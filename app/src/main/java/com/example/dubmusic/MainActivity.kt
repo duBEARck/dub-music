@@ -28,6 +28,12 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.RepeatOne
+import androidx.compose.material.icons.filled.SkipNext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -75,7 +81,8 @@ fun MusicAppMainScreen(viewModel: MusicViewModel) {
                             isPlaying = isPlaying,
                             progress = progress,
                             onTogglePlayback = { viewModel.togglePlayback() },
-                            onOpenFullScreen = { showFullScreenPlayer = true } // Открываем на весь экран!
+                            onNext = { viewModel.playNext() },
+                            onOpenFullScreen = { showFullScreenPlayer = true }
                         )
                     }
                     NavigationBar(containerColor = Color.White, tonalElevation = 8.dp) {
@@ -113,6 +120,8 @@ fun MusicAppMainScreen(viewModel: MusicViewModel) {
             }
         }
 
+
+        val customPlaylists by viewModel.allPlaylists.collectAsState(initial = emptyList<PlaylistEntity>())
         // Анимация выезда полноэкранного плеера снизу вверх
         AnimatedVisibility(
             visible = showFullScreenPlayer && currentTrack != null,
@@ -120,18 +129,26 @@ fun MusicAppMainScreen(viewModel: MusicViewModel) {
             exit = slideOutVertically(targetOffsetY = { it })   // Уезжает вниз
         ) {
             currentTrack?.let { track ->
+                val playlistsContainingTrack by viewModel.getPlaylistsForTrack(track.uri).collectAsState(initial = emptyList())
+                val playbackMode by viewModel.playbackMode.collectAsState()
                 FullScreenPlayer(
+                    playbackMode = playbackMode,
+                    playlistsContainingTrack = playlistsContainingTrack,
                     track = track,
                     isPlaying = isPlaying,
                     progress = progress,
-                    currentTime = currentTime, // Передаем
-                    totalTime = totalTime,     // Передаем
+                    currentTime = currentTime,
+                    totalTime = totalTime,
+                    playlists = customPlaylists, // ПЕРЕДАЕМ СПИСОК ПЛЕЙЛИСТОВ
                     onTogglePlayback = { viewModel.togglePlayback() },
                     onSeek = { viewModel.seekTo(it) },
                     onClose = { showFullScreenPlayer = false },
-                    onEdit = { trackToEdit = track }, // Прокидываем трек в редактор
-                    onNext = { /* ЗАГЛУШКА */ },
-                    onPrev = { /* ЗАГЛУШКА */ }
+                    onEdit = { trackToEdit = track },
+                    onNext = { viewModel.playNext() },
+                    onPrev = { viewModel.playPrev() },
+                    onToggleMode = { viewModel.togglePlaybackMode(it) }, // режим плеера
+                    // ПЕРЕДАЕМ КОМАНДУ ДОБАВЛЕНИЯ
+                    onAddToPlaylist = { playlist -> viewModel.addTrackToPlaylist(track, playlist) }
                 )
             }
         }
@@ -156,6 +173,7 @@ fun BottomPlayerBar(
     isPlaying: Boolean,
     progress: Float,
     onTogglePlayback: () -> Unit,
+    onNext: () -> Unit,
     onOpenFullScreen: () -> Unit
 ) {
     Column(
@@ -166,21 +184,42 @@ fun BottomPlayerBar(
             .clickable { onOpenFullScreen() } // Клик по прямоугольнику
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            // ИЗМЕНЕНИЕ 1: Заменили horizontal = 16.dp на start = 16.dp, end = 4.dp (чтобы прижать кнопки вправо)
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp).padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier.size(48.dp).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), RoundedCornerShape(8.dp)),
                 contentAlignment = Alignment.Center
             ) { Icon(Icons.Default.MusicNote, contentDescription = null, tint = MaterialTheme.colorScheme.primary) }
+
             Spacer(modifier = Modifier.width(12.dp))
+
             Column(modifier = Modifier.weight(1f)) {
                 Text(text = track.title ?: track.fileName, fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 1)
                 Text(text = track.artist ?: "Неизвестный", fontSize = 14.sp, color = Color.Gray, maxLines = 1)
             }
+
             // Кнопка Play/Pause. Важно: мы перехватываем клик, чтобы он не прошел на весь прямоугольник
             IconButton(onClick = onTogglePlayback) {
-                Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = "Play/Pause", modifier = Modifier.size(32.dp), tint = MaterialTheme.colorScheme.primary)
+                Icon(
+                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = "Play/Pause",
+                    // ИЗМЕНЕНИЕ 2: Увеличили размер до 36.dp, чтобы кнопки смотрелись увереннее
+                    modifier = Modifier.size(36.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            // Кнопка Следующий трек
+            IconButton(onClick = onNext) {
+                Icon(
+                    imageVector = Icons.Default.SkipNext,
+                    contentDescription = "Следующий",
+                    // ИЗМЕНЕНИЕ 3: Добавили точно такой же размер 36.dp и фирменный цвет
+                    modifier = Modifier.size(36.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
             }
         }
         // Та самая растущая полоска
@@ -199,70 +238,53 @@ fun BottomPlayerBar(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FullScreenPlayer(
+    playbackMode: PlaybackMode,
+    playlistsContainingTrack: List<Int>,
     track: TrackEntity,
     isPlaying: Boolean,
     progress: Float,
     currentTime: String,
     totalTime: String,
+    playlists: List<PlaylistEntity>,
     onTogglePlayback: () -> Unit,
     onSeek: (Float) -> Unit,
     onClose: () -> Unit,
     onEdit: () -> Unit,
     onNext: () -> Unit,
-    onPrev: () -> Unit
+    onPrev: () -> Unit,
+    onToggleMode: (PlaybackMode) -> Unit,
+    onAddToPlaylist: (PlaylistEntity) -> Unit
 ) {
-    // Переменная для хранения смещения окна при свайпе
     var offsetY by remember { mutableFloatStateOf(0f) }
+    // Состояние для отображения окна выбора плейлиста
+    var showPlaylistSelector by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            // Двигаем экран вслед за пальцем
             .offset { IntOffset(0, offsetY.roundToInt()) }
             .pointerInput(Unit) {
-                // Отслеживаем только вертикальные жесты, чтобы не мешать ползунку перемотки
                 detectVerticalDragGestures(
                     onDragEnd = {
-                        if (offsetY > 300f) {
-                            onClose() // Если свайпнули достаточно сильно - закрываем
-                        } else {
-                            offsetY = 0f // Иначе окно отпружинивает обратно
-                        }
+                        if (offsetY > 300f) onClose() else offsetY = 0f
                     }
                 ) { _, dragAmount ->
-                    // Разрешаем тянуть только вниз
-                    if (dragAmount > 0 || offsetY > 0) {
-                        offsetY += dragAmount
-                    }
+                    if (dragAmount > 0 || offsetY > 0) offsetY += dragAmount
                 }
             }
             .padding(top = 48.dp, bottom = 32.dp, start = 24.dp, end = 24.dp)
     ) {
-        IconButton(onClick = onClose) {
-            Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Свернуть", modifier = Modifier.size(36.dp))
-        }
-
+        IconButton(onClick = onClose) { Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Свернуть", modifier = Modifier.size(36.dp)) }
         Spacer(modifier = Modifier.height(24.dp))
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
-                .clip(RoundedCornerShape(24.dp))
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f))
-                .shadow(4.dp),
-            contentAlignment = Alignment.Center
-        ) {
+        Box(modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)).shadow(4.dp), contentAlignment = Alignment.Center) {
             Icon(Icons.Default.MusicNote, contentDescription = null, modifier = Modifier.size(120.dp), tint = MaterialTheme.colorScheme.primary)
         }
-
         Spacer(modifier = Modifier.height(32.dp))
 
-        // Название, Артист и 3 точки теперь в одном ряду!
+        // Название, Артист и 3 точки
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
-                // Шрифты уменьшены
                 Text(text = track.title ?: track.fileName, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                 Text(text = track.artist ?: "Неизвестный исполнитель", fontSize = 16.sp, color = Color.Gray, maxLines = 1)
             }
@@ -274,57 +296,107 @@ fun FullScreenPlayer(
                 }
                 DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
                     DropdownMenuItem(text = { Text("Изменить информацию") }, onClick = { showMenu = false; onEdit() })
-                    DropdownMenuItem(text = { Text("Добавить в плейлист") }, onClick = { showMenu = false; /* ЗАГЛУШКА */ })
+                    // Вызываем диалог выбора плейлиста
+                    DropdownMenuItem(text = { Text("Добавить в плейлист") }, onClick = { showMenu = false; showPlaylistSelector = true })
                 }
             }
         }
-
-        Spacer(modifier = Modifier.height(32.dp)) // Одинаковое расстояние от картинки до текста и от текста до кнопок
-
-        // Блок со временем
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
+        Spacer(modifier = Modifier.height(32.dp))
+        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(text = currentTime, fontSize = 12.sp, color = Color.Gray)
             Text(text = totalTime, fontSize = 12.sp, color = Color.Gray)
         }
-
-        Slider(
-            value = progress,
-            onValueChange = onSeek,
-            modifier = Modifier.fillMaxWidth(),
-            colors = SliderDefaults.colors(
-                thumbColor = MaterialTheme.colorScheme.primary,
-                activeTrackColor = MaterialTheme.colorScheme.primary
-            )
-        )
-
+        Slider(value = progress, onValueChange = onSeek, modifier = Modifier.fillMaxWidth(), colors = SliderDefaults.colors(thumbColor = MaterialTheme.colorScheme.primary, activeTrackColor = MaterialTheme.colorScheme.primary))
         Spacer(modifier = Modifier.height(8.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onPrev) { Icon(Icons.Default.SkipPrevious, contentDescription = "Назад", modifier = Modifier.size(48.dp)) }
+            IconButton(onClick = onTogglePlayback, modifier = Modifier.size(80.dp)) { Icon(imageVector = if (isPlaying) Icons.Default.PauseCircle else Icons.Default.PlayCircle, contentDescription = "Play/Pause", modifier = Modifier.fillMaxSize(), tint = MaterialTheme.colorScheme.primary) }
+            IconButton(onClick = onNext) { Icon(Icons.Default.SkipNext, contentDescription = "Вперед", modifier = Modifier.size(48.dp)) }
+        }
+        Spacer(modifier = Modifier.weight(1f))
 
+        // --- НОВЫЙ БЛОК: Кнопки режимов воспроизведения ---
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onPrev) { Icon(Icons.Default.SkipPrevious, contentDescription = "Назад", modifier = Modifier.size(48.dp)) }
-
-            IconButton(onClick = onTogglePlayback, modifier = Modifier.size(80.dp)) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Default.PauseCircle else Icons.Default.PlayCircle,
-                    contentDescription = "Play/Pause",
-                    modifier = Modifier.fillMaxSize(),
-                    tint = MaterialTheme.colorScheme.primary
-                )
+            // Случайный порядок
+            val isShuffle = playbackMode == PlaybackMode.SHUFFLE
+            IconButton(
+                onClick = { onToggleMode(PlaybackMode.SHUFFLE) },
+                modifier = Modifier.background(if (isShuffle) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent, CircleShape)
+            ) {
+                Icon(Icons.Default.Shuffle, contentDescription = "Случайный порядок", tint = if (isShuffle) MaterialTheme.colorScheme.primary else Color.Gray)
             }
 
-            IconButton(onClick = onNext) { Icon(Icons.Default.SkipNext, contentDescription = "Вперед", modifier = Modifier.size(48.dp)) }
-        }
+            // Повтор всего
+            val isRepeatAll = playbackMode == PlaybackMode.REPEAT_ALL
+            IconButton(
+                onClick = { onToggleMode(PlaybackMode.REPEAT_ALL) },
+                modifier = Modifier.background(if (isRepeatAll) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent, CircleShape)
+            ) {
+                Icon(Icons.Default.Repeat, contentDescription = "По кругу", tint = if (isRepeatAll) MaterialTheme.colorScheme.primary else Color.Gray)
+            }
 
-        // ВОТ ГЛАВНЫЙ СЕКРЕТ КОМПОНОВКИ:
-        // Пустое место перенесено в самый низ. Оно работает как пружина,
-        // выталкивая текст, ползунок и кнопки наверх, поближе к обложке.
-        Spacer(modifier = Modifier.weight(1f))
+            // Повтор одной
+            val isRepeatOne = playbackMode == PlaybackMode.REPEAT_ONE
+            IconButton(
+                onClick = { onToggleMode(PlaybackMode.REPEAT_ONE) },
+                modifier = Modifier.background(if (isRepeatOne) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent, CircleShape)
+            ) {
+                Icon(Icons.Default.RepeatOne, contentDescription = "Повторять один", tint = if (isRepeatOne) MaterialTheme.colorScheme.primary else Color.Gray)
+            }
+        }
+    }
+
+    // ДИАЛОГ ВЫБОРА ПЛЕЙЛИСТА
+    if (showPlaylistSelector) {
+        AlertDialog(
+            onDismissRequest = { showPlaylistSelector = false },
+            title = { Text("Выберите плейлист", fontWeight = FontWeight.Bold) },
+            text = {
+                if (playlists.isEmpty()) {
+                    Text("У вас пока нет плейлистов", color = Color.Gray)
+                } else {
+                    androidx.compose.foundation.lazy.LazyColumn {
+                        items(playlists.size) { index ->
+                            val playlist = playlists[index]
+                            // Проверяем, есть ли ID этого плейлиста в списке добавленных
+                            val isAlreadyAdded = playlistsContainingTrack.contains(playlist.playlistId)
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        if (!isAlreadyAdded) {
+                                            onAddToPlaylist(playlist)
+                                        }
+                                        showPlaylistSelector = false
+                                    }
+                                    .padding(vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween // Раздвигает текст и галочку по краям
+                            ) {
+                                Text(text = playlist.name, fontSize = 18.sp)
+
+                                // Если трек уже там — рисуем галочку
+                                if (isAlreadyAdded) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = "Добавлено",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPlaylistSelector = false }) { Text("Отмена") }
+            }
+        )
     }
 }
 
