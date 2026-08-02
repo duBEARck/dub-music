@@ -45,6 +45,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.ui.platform.LocalContext
 import android.content.Intent
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -210,6 +211,11 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
     // 1. ЭКРАН: КАСТОМНЫЙ ПЛЕЙЛИСТ
     // ------------------------------------
     if (openedPlaylist != null) {
+        // --- ПЕРЕХВАТЫВАЕМ СИСТЕМНЫЙ СВАЙП "НАЗАД" ---
+        BackHandler(enabled = true) {
+            openedPlaylist = null // Закрываем плейлист при свайпе
+        }
+
         val playlistTracks by viewModel.getTracksForPlaylist(openedPlaylist!!.playlistId).collectAsState(initial = emptyList<TrackEntity>())
         val totalDuration = viewModel.formatTotalDuration(playlistTracks)
         var showEditDialog by remember { mutableStateOf(false) }
@@ -378,6 +384,11 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
     // 2. ЭКРАН: ВСЕ СКАЧАННЫЕ ТРЕКИ
     // ------------------------------------
     else if (showAllTracks) {
+
+        BackHandler(enabled = true) {
+            showAllTracks = false // Закрываем плейлист при свайпе
+        }
+
         Column(modifier = Modifier.fillMaxSize()) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(16.dp)) {
                 IconButton(onClick = { showAllTracks = false }) { Icon(Icons.Default.ArrowBack, contentDescription = "Назад") }
@@ -405,6 +416,11 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
     // 3. ЭКРАН: СКРЫТЫЕ ТРЕКИ
     // ------------------------------------
     else if (showHiddenTracks) {
+
+        BackHandler(enabled = true) {
+            showHiddenTracks = false // Закрываем плейлист при свайпе
+        }
+
         Column(modifier = Modifier.fillMaxSize()) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(16.dp)) {
                 IconButton(onClick = { showHiddenTracks = false }) { Icon(Icons.Default.ArrowBack, contentDescription = "Назад") }
@@ -447,16 +463,33 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
 
             LazyColumn(modifier = Modifier.weight(1f)) {
                 items(customPlaylists) { playlist ->
-                    Row(modifier = Modifier.fillMaxWidth().clickable { openedPlaylist = playlist }.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (playlist.imageUri != null) {
-                            Image(painter = rememberAsyncImagePainter(playlist.imageUri), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)))
-                        } else {
-                            Box(modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)).background(Color.LightGray), contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.MusicNote, contentDescription = null, tint = Color.White)
+                    //Оборачиваем строку в Column, чтобы добавить разделитель снизу
+                    Column {
+                        Row(modifier = Modifier.fillMaxWidth().clickable { openedPlaylist = playlist }.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (playlist.imageUri != null) {
+                                Image(painter = rememberAsyncImagePainter(playlist.imageUri), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)))
+                            } else {
+                                Box(modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)).background(Color.LightGray), contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Default.MusicNote, contentDescription = null, tint = Color.White)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.width(16.dp))
+
+                            //обавляем weight(1f), чтобы текст занял всё свободное место и оттолкнул кнопку вправо
+                            Text(playlist.name, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+
+                            //Кнопка Play прямо в списке
+                            IconButton(
+                                onClick = { viewModel.playPlaylistDirectly(playlist.playlistId) },
+                                modifier = Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), CircleShape)
+                            ) {
+                                Icon(Icons.Default.PlayArrow, contentDescription = "Играть плейлист", tint = MaterialTheme.colorScheme.primary)
                             }
                         }
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Text(playlist.name, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+
+                        //Разделитель между плейлистами
+                        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), thickness = 1.dp, color = Color.LightGray.copy(alpha = 0.5f))
                     }
                 }
             }

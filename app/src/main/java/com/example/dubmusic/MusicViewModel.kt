@@ -17,6 +17,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
 import android.media.MediaMetadataRetriever
+import kotlinx.coroutines.flow.first
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
+import kotlinx.coroutines.withContext
 
 enum class PlaybackMode {
     NORMAL, SHUFFLE, REPEAT_ALL, REPEAT_ONE
@@ -162,7 +166,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     // --- ЛОГИКА ПЛЕЕРА ---
     private var currentQueue: List<TrackEntity> = emptyList()
     private var currentQueueIndex: Int = -1
-    private var mediaPlayer: MediaPlayer? = null
+    var musicService: MusicService? = null
     private var progressJob: Job? = null // Для фонового таймера прогресса
 
     private val _currentTrack = MutableStateFlow<TrackEntity?>(null)
@@ -204,51 +208,46 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     val progress: StateFlow<Float> = _progress.asStateFlow()
 
     fun playTrack(track: TrackEntity, playlist: List<TrackEntity>? = null) {
-        // Запоминаем плейлист, если его передали
         if (playlist != null) {
             currentQueue = playlist
             currentQueueIndex = currentQueue.indexOf(track)
         } else {
-            // Если не передали (например, нажали кнопку "следующий"), ищем позицию в текущем списке
             currentQueueIndex = currentQueue.indexOf(track)
         }
 
-        // Очищаем старый плеер
-        mediaPlayer?.release()
         progressJob?.cancel()
 
-        try {
-            mediaPlayer = MediaPlayer().apply {
-                setDataSource(getApplication(), Uri.parse(track.uri))
-                prepare()
-                start()
+        // 1. Сначала подготавливаем плеер и запускаем музыку в сервисе
+        musicService?.currentTrackItem = track // <--- Сохраняем объект в бессмертный Сервис!
+        musicService?.playTrack(track.uri)
+
+        musicService?.onTrackCompletion = {
+            if (_playbackMode.value == PlaybackMode.NORMAL && currentQueueIndex >= currentQueue.size - 1) {
+                _isPlaying.value = false
+                _progress.value = 0f
+                _currentTime.value = "0:00"
+                progressJob?.cancel()
+            } else {
+                playNext()
             }
-
-            // Обновляем состояния
-            _currentTrack.value = track
-            _isPlaying.value = true
-            _totalTime.value = formatTime(mediaPlayer?.duration ?: 0)
-
-            startProgressUpdate()
-
-            // Слушатель окончания трека
-            mediaPlayer?.setOnCompletionListener {
-                // Останавливаем ТОЛЬКО если режим NORMAL и это последняя песня
-                if (_playbackMode.value == PlaybackMode.NORMAL && currentQueueIndex >= currentQueue.size - 1) {
-                    _isPlaying.value = false
-                    _progress.value = 0f
-                    _currentTime.value = "0:00"
-                    progressJob?.cancel()
-                } else {
-                    // Во всех остальных случаях просто вызываем playNext (он сам разберется по режиму)
-                    playNext()
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
 
+        _currentTrack.value = track
+        _isPlaying.value = true
+        _totalTime.value = formatTime(musicService?.getDuration() ?: 0)
 
+        startProgressUpdate()
+
+        // 2. СРАЗУ собираем красивое уведомление со всеми метаданными
+        musicService?.updateNotification(
+            title = track.title ?: track.fileName,
+            artist = track.artist ?: "Неизвестный исполнитель",
+            isPlaying = true
+        )
+
+        // 3. И только теперь официально привязываем сервис к шторке
+        val intent = android.content.Intent(getApplication(), MusicService::class.java)
+        getApplication<android.app.Application>().startForegroundService(intent)
     }
 
     fun playNext() {
@@ -274,7 +273,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 if (currentQueueIndex < currentQueue.size - 1) {
                     playTrack(currentQueue[currentQueueIndex + 1])
                 } else {
-                    mediaPlayer?.pause()
+                    musicService?.pause()
                     _isPlaying.value = false
                 }
             }
@@ -284,87 +283,125 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun playPrev() {
         if (currentQueue.isEmpty() || currentQueueIndex == -1) return
 
-        val currentPosition = mediaPlayer?.currentPosition ?: 0
+        val currentPosition = musicService?.getCurrentPosition() ?: 0
         // Если прошло больше 5 секунд - всегда начинаем заново, независимо от режима
         if (currentPosition > 5000) {
-            seekTo(0f)
-            mediaPlayer?.start()
-            _isPlaying.value = true
+            _isPlaying.value = true      // 1. Сначала говорим, что музыка играет
+            musicService?.resume()       // 2. Запускаем плеер
+            seekTo(0f)                  // 3. Перематываем (это автоматически обновит шторку!)
         } else {
+            // Прошло меньше 5 секунд -> переключаем на предыдущий
             when (_playbackMode.value) {
                 PlaybackMode.REPEAT_ONE -> playTrack(currentQueue[currentQueueIndex])
                 PlaybackMode.SHUFFLE -> {
                     val prevIndex = currentQueue.indices.random()
                     playTrack(currentQueue[prevIndex])
                 }
+
                 PlaybackMode.REPEAT_ALL -> {
-                    // Если мы на 0, перекидываем в самый конец
-                    val prevIndex = if (currentQueueIndex > 0) currentQueueIndex - 1 else currentQueue.size - 1
+                    val prevIndex =
+                        if (currentQueueIndex > 0) currentQueueIndex - 1 else currentQueue.size - 1
                     playTrack(currentQueue[prevIndex])
                 }
+
                 PlaybackMode.NORMAL -> {
                     if (currentQueueIndex > 0) {
                         playTrack(currentQueue[currentQueueIndex - 1])
                     } else {
-                        seekTo(0f)
-                        mediaPlayer?.start()
                         _isPlaying.value = true
+                        musicService?.resume()
+                        seekTo(0f)
                     }
                 }
             }
         }
     }
 
-    fun seekTo(fraction: Float) {
-        mediaPlayer?.let {
-            val newPosition = (it.duration * fraction).toInt()
-            it.seekTo(newPosition)
+        fun seekTo(fraction: Float) {
+            val duration = musicService?.getDuration() ?: 0
+            val newPosition = (duration * fraction).toInt()
+            musicService?.seekTo(newPosition)
             _progress.value = fraction
-            _currentTime.value = formatTime(newPosition) // Обновляем время при перемотке
+            _currentTime.value = formatTime(newPosition)
+
+            // Обновляем шторку, чтобы она узнала о перемещении во времени
+            _currentTrack.value?.let { track ->
+                musicService?.updateNotification(
+                    title = track.title ?: track.fileName,
+                    artist = track.artist ?: "Неизвестный исполнитель",
+                    isPlaying = _isPlaying.value
+                )
+            }
         }
-    }
 
     private fun startProgressUpdate() {
-        progressJob?.cancel()
-        progressJob = viewModelScope.launch(Dispatchers.Main) {
-            while (isActive) {
-                mediaPlayer?.let {
-                    try {
-                        if (it.isPlaying && it.duration > 0) {
-                            val pos = it.currentPosition
-                            _progress.value = pos.toFloat() / it.duration.toFloat()
-                            _currentTime.value = formatTime(pos) // Таймер тикает
-                        }
-                    } catch (e: Exception) { /* Игнорируем скачки */ }
+        progressJob = viewModelScope.launch {
+            while (true) {
+                if (_isPlaying.value) {
+                    val current = musicService?.getCurrentPosition() ?: 0
+                    val total = musicService?.getDuration() ?: 1
+                    _progress.value = if (total > 0) current.toFloat() / total else 0f
+                    _currentTime.value = formatTime(current)
                 }
-                delay(500)
+                kotlinx.coroutines.delay(1000)
             }
         }
     }
 
     fun togglePlayback() {
-        mediaPlayer?.let {
-            if (it.isPlaying) {
-                it.pause()
-                _isPlaying.value = false
-                progressJob?.cancel() // Останавливаем таймер
-            } else {
-                it.start()
-                _isPlaying.value = true
-                startProgressUpdate() // Возобновляем таймер
-            }
+        if (_isPlaying.value) {
+            musicService?.pause()
+            _isPlaying.value = false
+        } else {
+            musicService?.resume()
+            _isPlaying.value = true
+        }
+        // Обновляем кнопку Play/Pause в шторке
+        _currentTrack.value?.let { track ->
+            musicService?.updateNotification(
+                title = track.title ?: track.fileName,
+                artist = track.artist ?: "Неизвестный исполнитель",
+                isPlaying = _isPlaying.value
+            )
         }
     }
 
     override fun onCleared() {
         super.onCleared()
-        mediaPlayer?.release()
         progressJob?.cancel()
     }
 
     fun deletePlaylist(playlist: PlaylistEntity) {
         viewModelScope.launch(Dispatchers.IO) {
             dao.deletePlaylist(playlist)
+        }
+    }
+
+    fun playPlaylistDirectly(playlistId: Int) {
+        viewModelScope.launch {
+            // Берем актуальный список треков из базы (единоразово)
+            val tracks = getTracksForPlaylist(playlistId).first()
+
+            if (tracks.isNotEmpty()) {
+                withContext(Dispatchers.Main) {
+                    playTrack(tracks.first(), tracks) // Запускаем первую песню и передаем очередь
+                }
+            }
+        }
+    }
+
+    fun syncWithService() {
+        val service = musicService ?: return
+
+        // Берем 100% готовый трек прямо из памяти Сервиса!
+        val track = service.currentTrackItem ?: return
+
+        _currentTrack.value = track
+        _isPlaying.value = service.isPlaying()
+        _totalTime.value = formatTime(service.getDuration())
+
+        if (_isPlaying.value) {
+            startProgressUpdate()
         }
     }
 }

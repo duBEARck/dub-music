@@ -1,5 +1,7 @@
 package com.example.dubmusic
 
+import android.os.Build
+import android.Manifest
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -28,24 +30,56 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.IBinder
+import androidx.activity.viewModels
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.SkipNext
+import androidx.activity.compose.BackHandler
 
 class MainActivity : ComponentActivity() {
+
+    private val viewModel: MusicViewModel by viewModels()
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // Спрашиваем разрешение на уведомления для новых версий Android
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
+
+        // --- НОВЫЙ БЛОК: Подключение к фоновому сервису ---
+        val connection = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+                val binder = service as MusicService.MusicBinder
+                viewModel.musicService = binder.getService()
+
+                viewModel.musicService?.onNextClick = { viewModel.playNext() }
+                viewModel.musicService?.onPrevClick = { viewModel.playPrev() }
+                viewModel.musicService?.onPlayPauseClick = { viewModel.togglePlayback() }
+
+                // --- НОВОЕ: Синхронизируем интерфейс с Сервисом! ---
+                viewModel.syncWithService()
+            }
+            override fun onServiceDisconnected(name: ComponentName?) {
+                viewModel.musicService = null
+            }
+        }
+
+        val serviceIntent = Intent(this, MusicService::class.java)
+        bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(
                 primary = Color(0xFF6200EA),
                 background = Color(0xFFF5F5F5),
                 surface = Color.White
             )) {
-                val viewModel: MusicViewModel = viewModel()
                 MusicAppMainScreen(viewModel)
             }
         }
@@ -123,6 +157,10 @@ fun MusicAppMainScreen(viewModel: MusicViewModel) {
 
         val customPlaylists by viewModel.allPlaylists.collectAsState(initial = emptyList<PlaylistEntity>())
         // Анимация выезда полноэкранного плеера снизу вверх
+        // --- НОВОЕ: Закрываем большой плеер свайпом "Назад" ---
+        BackHandler(enabled = showFullScreenPlayer) {
+            showFullScreenPlayer = false
+        }
         AnimatedVisibility(
             visible = showFullScreenPlayer && currentTrack != null,
             enter = slideInVertically(initialOffsetY = { it }), // Выезжает снизу
