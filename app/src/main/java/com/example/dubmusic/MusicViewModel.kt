@@ -1,5 +1,6 @@
 package com.example.dubmusic
 
+import android.R.attr.track
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -20,14 +21,18 @@ import android.media.MediaMetadataRetriever
 import kotlinx.coroutines.flow.first
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.mapLatest
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.flatMapLatest
 
 enum class PlaybackMode {
     NORMAL, SHUFFLE, REPEAT_ALL, REPEAT_ONE
 }
+enum class StatsPeriod { DAY, WEEK, MONTH, YEAR, ALL_TIME }
 class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     // Инициализируем базу данных
@@ -53,6 +58,24 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _openedAlbumTitle = MutableStateFlow<String?>(null)
     val openedAlbumTitle: StateFlow<String?> = _openedAlbumTitle.asStateFlow()
+
+    // --- НАВИГАЦИЯ ДЛЯ ПЛЕЙЛИСТОВ (Для сброса по двойному клику) ---
+    private val _openedPlaylist = MutableStateFlow<PlaylistEntity?>(null)
+    val openedPlaylist = _openedPlaylist.asStateFlow()
+    fun openPlaylist(playlist: PlaylistEntity?) { _openedPlaylist.value = playlist }
+
+    private val _showAllTracksPlaylists = MutableStateFlow(false)
+    val showAllTracksPlaylists = _showAllTracksPlaylists.asStateFlow()
+    fun setShowAllTracksPlaylists(show: Boolean) { _showAllTracksPlaylists.value = show }
+
+    private val _showHiddenTracks = MutableStateFlow(false)
+    val showHiddenTracks = _showHiddenTracks.asStateFlow()
+    fun setShowHiddenTracks(show: Boolean) { _showHiddenTracks.value = show }
+
+    // --- ДИНАМИЧЕСКИЙ ТОП АРТИСТА ---
+    fun getDynamicArtistTopTracks(artistName: String): Flow<List<TrackEntity>> {
+        return dao.getDynamicArtistTopTracks(artistName)
+    }
 
     fun openArtist(name: String?) { _openedArtistName.value = name }
     fun openAlbum(title: String?) { _openedAlbumTitle.value = title }
@@ -172,6 +195,129 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             dao.updateTrack(track.copy(isHidden = false))
         }
     }
+
+    // --- АНАЛИТИКА И СТАТИСТИКА ---
+    private val _currentStatsPeriod = MutableStateFlow(StatsPeriod.MONTH)
+    val currentStatsPeriod = _currentStatsPeriod.asStateFlow()
+
+    fun setStatsPeriod(period: StatsPeriod) {
+        _currentStatsPeriod.value = period
+    }
+
+    // Хелпер: отдает начало и конец выбранного периода в миллисекундах
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val periodBounds: StateFlow<Pair<Long, Long>> = _currentStatsPeriod
+        .mapLatest { period ->
+            val calendar = java.util.Calendar.getInstance()
+            val endTime = calendar.timeInMillis // Конец всегда "сейчас"
+
+            // Сбрасываем часы, минуты и секунды в ноль для точного начала
+            calendar.set(java.util.Calendar.HOUR_OF_DAY, 0)
+            calendar.set(java.util.Calendar.MINUTE, 0)
+            calendar.set(java.util.Calendar.SECOND, 0)
+            calendar.set(java.util.Calendar.MILLISECOND, 0)
+
+            when (period) {
+                StatsPeriod.DAY -> { /* Уже сброшено на начало сегодняшнего дня */ }
+                StatsPeriod.WEEK -> {
+                    calendar.firstDayOfWeek = java.util.Calendar.MONDAY // Жестко задаем понедельник
+                    calendar.set(java.util.Calendar.DAY_OF_WEEK, java.util.Calendar.MONDAY)
+                }
+                StatsPeriod.MONTH -> {
+                    calendar.set(java.util.Calendar.DAY_OF_MONTH, 1)
+                }
+                StatsPeriod.YEAR -> {
+                    calendar.set(java.util.Calendar.DAY_OF_YEAR, 1)
+                }
+                StatsPeriod.ALL_TIME -> {
+                    calendar.timeInMillis = 0L // От начала времен
+                }
+            }
+            Pair(calendar.timeInMillis, endTime)
+        }
+        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, Pair(0L, System.currentTimeMillis()))
+
+    // Вспомогательная функция для красивого вывода часов и минут
+    fun formatMsToHoursMinutes(totalMs: Long?): String {
+        if (totalMs == null || totalMs == 0L) return "0 мин"
+        val totalSeconds = totalMs / 1000
+        val minutes = (totalSeconds / 60) % 60
+        val hours = totalSeconds / 3600
+        return if (hours > 0) "$hours ч $minutes мин" else "$minutes мин"
+    }
+
+    // --- АВТОМАТИЧЕСКИЕ ПОТОКИ ДАННЫХ ДЛЯ СТАТИСТИКИ ---
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val totalListenTime = periodBounds.flatMapLatest { bounds ->
+        dao.getTotalListenTime(bounds.first, bounds.second)
+    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), 0L)
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val tracksAddedCount = periodBounds.flatMapLatest { bounds ->
+        dao.getTracksAddedCount(bounds.first, bounds.second)
+    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), 0)
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val topTracksStats = periodBounds.flatMapLatest { bounds ->
+        dao.getTopTracks(bounds.first, bounds.second)
+    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val topArtistsStats = periodBounds.flatMapLatest { bounds ->
+        dao.getTopArtists(bounds.first, bounds.second)
+    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val topTracksByCountStats = periodBounds.flatMapLatest { bounds ->
+        dao.getTopTracksByCount(bounds.first, bounds.second)
+    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val topArtistsByCountStats = periodBounds.flatMapLatest { bounds ->
+        dao.getTopArtistsByCount(bounds.first, bounds.second)
+    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
+
+    // --- ГЛОБАЛЬНЫЕ МЕТРИКИ (НЕ ЗАВИСЯТ ОТ ФИЛЬТРА ВРЕМЕНИ) ---
+    // Передаем 0 и Long.MAX_VALUE, чтобы вытащить данные за всё время
+    val loyaltyArtists = dao.getTopArtistsByDays(0L, Long.MAX_VALUE)
+        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val bingeRecord = dao.getHistoryUris().mapLatest { uris ->
+        var maxStreak = 0L
+        var currentStreak = 0L
+        var bestUri: String? = null
+        var currentUri: String? = null
+
+        // Пробегаемся по всей истории и считаем повторы подряд
+        for (uri in uris) {
+            if (uri == currentUri) {
+                currentStreak++
+            } else {
+                currentUri = uri
+                currentStreak = 1L
+            }
+            // Запоминаем рекордсмена
+            if (currentStreak > maxStreak) {
+                maxStreak = currentStreak
+                bestUri = currentUri
+            }
+        }
+
+        // Если нашли рекордсмена - достаем его из базы и упаковываем для интерфейса
+        if (bestUri != null) {
+            val track = dao.getTrackByUri(bestUri).firstOrNull()
+            if (track != null) TrackStat(track, maxStreak) else null
+        } else {
+            null
+        }
+    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), null)
+
+    // --- ТЕПЛОВАЯ КАРТА ---
+    val heatmapDays = dao.getHeatmapDays().stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
+    val heatmapWeeks = dao.getHeatmapWeeks().stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
+    val heatmapMonths = dao.getHeatmapMonths().stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
+
 
     // --- ЛОГИКА КАСТОМНЫХ ПЛЕЙЛИСТОВ ---
     val allPlaylists = dao.getAllPlaylists()
@@ -327,8 +473,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _progress = MutableStateFlow(0f)
     val progress: StateFlow<Float> = _progress.asStateFlow()
 
-    // Добавили параметр forcedTitle
     fun playTrack(track: TrackEntity, playlist: List<TrackEntity>? = null, forcedTitle: String? = null) {
+
+        // --- ЗАПИСЬ СТАТИСТИКИ ПРЕДЫДУЩЕГО ТРЕКА ---
+        _currentTrack.value?.let { prevTrack ->
+            val playedMs = musicService?.getCurrentPosition()?.toLong() ?: 0L
+            // Записываем историю, только если слушали дольше 10 секунд (отсекаем случайные скипы)
+            if (playedMs > 10000) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    dao.insertListeningHistory(
+                        ListeningHistoryEntity(
+                            trackUri = prevTrack.uri,
+                            durationPlayedMs = playedMs
+                        )
+                    )
+                }
+            }
+        }
+        // ------------------------------------------
+
         if (playlist != null) {
             currentQueue = playlist
             _currentQueueFlow.value = playlist

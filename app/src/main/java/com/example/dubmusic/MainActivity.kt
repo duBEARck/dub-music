@@ -154,12 +154,13 @@ fun MusicAppMainScreen(viewModel: MusicViewModel) {
     val currentQueue by viewModel.currentQueueFlow.collectAsState()
     val queueTitle by viewModel.currentQueueTitle.collectAsState()
 
-    val items = listOf("Волна", "Статистика", "Сохранённое", "Плейлисты")
+    val items = listOf("Статистика", "Медиатека", "Сохранённое", "Плейлисты")
+
     val icons = listOf(
-        Icons.Default.Waves,
-        Icons.Default.Assessment,
-        Icons.Default.LibraryMusic,
-        Icons.Default.QueueMusic
+        Icons.Default.Assessment,   // Статистика (График)
+        Icons.Default.Audiotrack,   // Медиатека (Нота/Трек)
+        Icons.Default.LibraryMusic, // Сохранённое (Папка с музыкой)
+        Icons.Default.QueueMusic    // Плейлисты (Очередь)
     )
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -184,7 +185,25 @@ fun MusicAppMainScreen(viewModel: MusicViewModel) {
                                 icon = { Icon(icons[index], contentDescription = item) },
                                 label = { Text(item) },
                                 selected = selectedItem == index,
-                                onClick = { selectedItem = index },
+                                onClick = {
+                                    if (selectedItem == index) {
+                                        // СБРОС (Tap-to-root): Если мы уже на этой вкладке, закрываем всё внутреннее
+                                        when (index) {
+                                            1 -> { // Медиатека
+                                                viewModel.openAlbum(null)
+                                                viewModel.openArtist(null)
+                                            }
+                                            3 -> { // Плейлисты
+                                                viewModel.openPlaylist(null)
+                                                viewModel.setShowAllTracksPlaylists(false)
+                                                viewModel.setShowHiddenTracks(false)
+                                            }
+                                        }
+                                    } else {
+                                        // Обычный переход на другую вкладку
+                                        selectedItem = index
+                                    }
+                                },
                                 colors = NavigationBarItemDefaults.colors(
                                     selectedIconColor = MaterialTheme.colorScheme.primary,
                                     selectedTextColor = MaterialTheme.colorScheme.primary,
@@ -204,9 +223,13 @@ fun MusicAppMainScreen(viewModel: MusicViewModel) {
                     .padding(bottom = innerPadding.calculateBottomPadding())
                     .background(MaterialTheme.colorScheme.background)
             ) {
+                // ОБНОВЛЯЕМ МАРШРУТИЗАЦИЮ
                 when (selectedItem) {
-                    0 -> StubScreen("Волна", "Здесь будет случайный поток треков")
-                    1 -> StatsTabScreen(viewModel = viewModel)
+                    0 -> RealStatsScreen(
+                        viewModel = viewModel,
+                        onNavigateToLibrary = { selectedItem = 1 } // Умный переход в Медиатеку
+                    )
+                    1 -> LibraryTabScreen(viewModel = viewModel)
                     2 -> SavedTabScreen(viewModel)
                     3 -> PlaylistsTabScreen(viewModel)
                 }
@@ -938,115 +961,409 @@ fun StubScreen(title: String, subtitle: String) {
     }
 }
 
+// ==========================================
+// ВКЛАДКА 1: МЕДИАТЕКА (С ПОИСКОМ)
+// ==========================================
 @Composable
-fun StatsTabScreen(viewModel: MusicViewModel) {
-    // Читаем глобальные состояния из ViewModel
+fun LibraryTabScreen(viewModel: MusicViewModel) {
     val openedArtistName by viewModel.openedArtistName.collectAsState()
     val openedAlbumTitle by viewModel.openedAlbumTitle.collectAsState()
-
     val artists by viewModel.artistsList.collectAsState()
 
-    val currentArtist = remember(artists, openedArtistName) {
-        artists.find { it.name == openedArtistName }
-    }
+    val currentArtist = remember(artists, openedArtistName) { artists.find { it.name == openedArtistName } }
+    val currentAlbum = remember(currentArtist, openedAlbumTitle) { currentArtist?.albums?.find { it.title == openedAlbumTitle } }
 
-    val currentAlbum = remember(currentArtist, openedAlbumTitle) {
-        currentArtist?.albums?.find { it.title == openedAlbumTitle }
+    var searchQuery by remember { mutableStateOf("") }
+    var isSearchActive by remember { mutableStateOf(false) }
+
+    // Системный "Назад" для поиска
+    BackHandler(enabled = isSearchActive) {
+        isSearchActive = false
+        searchQuery = ""
     }
 
     if (currentAlbum != null) {
-        BackHandler { viewModel.openAlbum(null) } // Закрываем через ViewModel
-        AlbumScreen(
-            album = currentAlbum,
-            viewModel = viewModel,
-            onClose = { viewModel.openAlbum(null) })
+        BackHandler { viewModel.openAlbum(null) }
+        AlbumScreen(album = currentAlbum, viewModel = viewModel, onClose = { viewModel.openAlbum(null) })
     } else if (currentArtist != null) {
         BackHandler { viewModel.openArtist(null) }
-        ArtistScreen(
-            artist = currentArtist,
-            viewModel = viewModel,
-            onAlbumClick = { album -> viewModel.openAlbum(album.title) },
-            onClose = { viewModel.openArtist(null) })
+        ArtistScreen(artist = currentArtist, viewModel = viewModel, onAlbumClick = { album -> viewModel.openAlbum(album.title) }, onClose = { viewModel.openArtist(null) })
     } else {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .statusBarsPadding()
-        ) {
-            Text(
-                text = "Моя медиатека",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(16.dp)
-            )
+        Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+
+            // ИДЕАЛЬНОЕ ВЫРАВНИВАНИЕ ШАПКИ
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                if (isSearchActive) {
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text("Поиск исполнителя...") },
+                        singleLine = true,
+                        trailingIcon = { IconButton(onClick = { searchQuery = ""; isSearchActive = false }) { Icon(Icons.Default.Close, contentDescription = "Закрыть поиск") } }
+                    )
+                } else {
+                    Text(text = "Моя медиатека", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                    IconButton(onClick = { isSearchActive = true }) { Icon(Icons.Default.Search, contentDescription = "Поиск") }
+                }
+            }
+
+            val filteredArtists = remember(artists, searchQuery) {
+                if (searchQuery.isBlank()) artists else artists.filter { it.name.contains(searchQuery, ignoreCase = true) }
+            }
 
             if (artists.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("Здесь пока пусто. Добавьте музыку!", color = Color.Gray)
-                }
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Здесь пока пусто. Добавьте музыку!", color = Color.Gray) }
+            } else if (filteredArtists.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Исполнитель не найден", color = Color.Gray) }
             } else {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(artists) { artist ->
-                        val bitmap = remember(artist.photoUri) {
-                            artist.photoUri?.let { path ->
-                                try {
-                                    android.graphics.BitmapFactory.decodeFile(path)
-                                } catch (e: Exception) {
-                                    null
-                                }
-                            }
-                        }
-
+                    items(filteredArtists) { artist ->
+                        val bitmap = remember(artist.photoUri) { artist.photoUri?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } } }
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { viewModel.openArtist(artist.name) } // Открываем через ViewModel
-                                .padding(16.dp),
+                            modifier = Modifier.fillMaxWidth().clickable { viewModel.openArtist(artist.name) }.padding(16.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             if (bitmap != null) {
-                                androidx.compose.foundation.Image(
-                                    bitmap = bitmap.asImageBitmap(),
-                                    contentDescription = "Фото исполнителя",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier
-                                        .size(56.dp)
-                                        .clip(CircleShape)
-                                )
+                                androidx.compose.foundation.Image(bitmap = bitmap.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(56.dp).clip(CircleShape))
                             } else {
-                                Box(
-                                    modifier = Modifier
-                                        .size(56.dp)
-                                        .clip(CircleShape)
-                                        .background(Color.LightGray),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        Icons.Default.Person,
-                                        contentDescription = null,
-                                        tint = Color.White
-                                    )
-                                }
+                                Box(modifier = Modifier.size(56.dp).clip(CircleShape).background(Color.LightGray), contentAlignment = Alignment.Center) { Icon(Icons.Default.Person, contentDescription = null, tint = Color.White) }
                             }
                             Spacer(modifier = Modifier.width(16.dp))
                             Column {
                                 Text(artist.name, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                                Text(
-                                    "${artist.albums.size} релизов • ${artist.allTracks.size} треков",
-                                    fontSize = 14.sp,
-                                    color = Color.Gray
-                                )
+                                Text("${artist.albums.size} релизов • ${artist.allTracks.size} треков", fontSize = 14.sp, color = Color.Gray)
                             }
                         }
-                        HorizontalDivider(
-                            modifier = Modifier.padding(horizontal = 16.dp),
-                            color = Color.LightGray.copy(alpha = 0.3f)
-                        )
+                        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = Color.LightGray.copy(alpha = 0.3f))
                     }
                 }
             }
         }
     }
+}
+
+// ==========================================
+// ВКЛАДКА 0: СТАТИСТИКА
+// ==========================================
+@Composable
+fun RealStatsScreen(viewModel: MusicViewModel, onNavigateToLibrary: () -> Unit) {
+    val currentPeriod by viewModel.currentStatsPeriod.collectAsState()
+    val totalTimeMs by viewModel.totalListenTime.collectAsState()
+    val addedCount by viewModel.tracksAddedCount.collectAsState()
+
+    val topTracksTime by viewModel.topTracksStats.collectAsState()
+    val topArtistsTime by viewModel.topArtistsStats.collectAsState()
+    val topTracksCount by viewModel.topTracksByCountStats.collectAsState()
+    val topArtistsCount by viewModel.topArtistsByCountStats.collectAsState()
+
+    // Новые глобальные потоки
+    val loyaltyArtists by viewModel.loyaltyArtists.collectAsState()
+    val bingeRecord by viewModel.bingeRecord.collectAsState()
+
+    val artists by viewModel.artistsList.collectAsState()
+
+    var tracksSortByTime by remember { mutableStateOf(true) }
+    var artistsSortByTime by remember { mutableStateOf(true) }
+    var showHeatmapDialog by remember { mutableStateOf(false) }
+
+    val periodNames = listOf("День", "Неделя", "Месяц", "Год", "Всё время")
+    val periods = StatsPeriod.values()
+
+    Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+
+        // ШАПКА С КНОПКОЙ КАЛЕНДАРЯ
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(text = "Статистика", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            IconButton(
+                onClick = { showHeatmapDialog = true },
+                modifier = Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), CircleShape)
+            ) {
+                Icon(Icons.Default.CalendarMonth, contentDescription = "Тепловая карта", tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+
+        ScrollableTabRow(
+            selectedTabIndex = currentPeriod.ordinal,
+            edgePadding = 16.dp,
+            containerColor = Color.Transparent,
+            indicator = {}
+        ) {
+            periods.forEachIndexed { index, period ->
+                val isSelected = currentPeriod == period
+                Tab(
+                    selected = isSelected,
+                    onClick = { viewModel.setStatsPeriod(period) },
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp).clip(RoundedCornerShape(16.dp)).background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
+                ) {
+                    Text(text = periodNames[index], color = if (isSelected) Color.White else Color.Gray, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(16.dp)
+        ) {
+            // ... [1 & 2. КАРТОЧКИ ВРЕМЕНИ И ТРЕКОВ] ...
+            item {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Card(modifier = Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text("Прослушано", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 14.sp)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(viewModel.formatMsToHoursMinutes(totalTimeMs), fontWeight = FontWeight.Bold, fontSize = 18.sp, color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                    Card(modifier = Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text("Добавлено", color = MaterialTheme.colorScheme.onSecondaryContainer, fontSize = 14.sp)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("$addedCount треков", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = MaterialTheme.colorScheme.secondary)
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(24.dp))
+                HorizontalDivider(thickness = 4.dp, color = Color.LightGray.copy(alpha = 0.2f))
+                Spacer(modifier = Modifier.height(24.dp))
+            }
+
+            // ... [3. ТОП ТРЕКОВ (Зависит от времени)] ...
+            val currentTopTracks = if (tracksSortByTime) topTracksTime else topTracksCount
+            if (currentTopTracks.isNotEmpty()) {
+                item {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text("Топ 5 треков", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Row(modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(Color.LightGray.copy(alpha = 0.3f)), verticalAlignment = Alignment.CenterVertically) {
+                            Text("Время", fontSize = 11.sp, color = if (tracksSortByTime) Color.White else Color.Black, modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(if (tracksSortByTime) MaterialTheme.colorScheme.primary else Color.Transparent).clickable { tracksSortByTime = true }.padding(horizontal = 8.dp, vertical = 6.dp))
+                            Text("Разы", fontSize = 11.sp, color = if (!tracksSortByTime) Color.White else Color.Black, modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(if (!tracksSortByTime) MaterialTheme.colorScheme.primary else Color.Transparent).clickable { tracksSortByTime = false }.padding(horizontal = 8.dp, vertical = 6.dp))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+                itemsIndexed(currentTopTracks) { index, trackStat ->
+                    val statText = if (tracksSortByTime) viewModel.formatMsToHoursMinutes(trackStat.statValue) else "${trackStat.statValue} раз"
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("#${index + 1}", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Color.Gray, modifier = Modifier.width(30.dp))
+                            Box(modifier = Modifier.weight(1f)) {
+                                TrackRowItem(track = trackStat.track, coverUri = viewModel.getAlbumCoverPath(trackStat.track.artist, trackStat.track.album), isPlaying = false, trailingText = statText) {
+                                    viewModel.playTrack(trackStat.track, currentTopTracks.map { it.track }, forcedTitle = "Топ треков: ${periodNames[currentPeriod.ordinal]}")
+                                }
+                            }
+                        }
+                        if (index < currentTopTracks.lastIndex) HorizontalDivider(modifier = Modifier.padding(start = 46.dp), color = Color.LightGray.copy(alpha = 0.3f))
+                    }
+                }
+                item {
+                    Spacer(modifier = Modifier.height(24.dp))
+                    HorizontalDivider(thickness = 4.dp, color = Color.LightGray.copy(alpha = 0.2f))
+                    Spacer(modifier = Modifier.height(24.dp))
+                }
+            }
+
+            // ... [4. ТОП ИСПОЛНИТЕЛЕЙ (Зависит от времени)] ...
+            val currentTopArtists = if (artistsSortByTime) topArtistsTime else topArtistsCount
+            if (currentTopArtists.isNotEmpty()) {
+                item {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text("Топ исполнителей", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Row(modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(Color.LightGray.copy(alpha = 0.3f)), verticalAlignment = Alignment.CenterVertically) {
+                            Text("Время", fontSize = 11.sp, color = if (artistsSortByTime) Color.White else Color.Black, modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(if (artistsSortByTime) MaterialTheme.colorScheme.primary else Color.Transparent).clickable { artistsSortByTime = true }.padding(horizontal = 8.dp, vertical = 6.dp))
+                            Text("Разы", fontSize = 11.sp, color = if (!artistsSortByTime) Color.White else Color.Black, modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(if (!artistsSortByTime) MaterialTheme.colorScheme.primary else Color.Transparent).clickable { artistsSortByTime = false }.padding(horizontal = 8.dp, vertical = 6.dp))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+                itemsIndexed(currentTopArtists) { index, artistStat ->
+                    val statText = if (artistsSortByTime) viewModel.formatMsToHoursMinutes(artistStat.statValue) else "${artistStat.statValue} раз"
+                    val artistObj = remember(artists, artistStat.artist) { artists.find { it.name == artistStat.artist } }
+                    val bitmap = remember(artistObj?.photoUri) { artistObj?.photoUri?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } } }
+
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable { viewModel.openArtist(artistStat.artist); onNavigateToLibrary() }.padding(vertical = 12.dp, horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("#${index + 1}", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Color.Gray, modifier = Modifier.width(30.dp))
+                            if (bitmap != null) {
+                                androidx.compose.foundation.Image(bitmap = bitmap.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(48.dp).clip(CircleShape))
+                            } else {
+                                Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(Color.LightGray), contentAlignment = Alignment.Center) { Icon(Icons.Default.Person, contentDescription = null, tint = Color.White) }
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(artistStat.artist, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                            Text(statText, fontSize = 14.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        }
+                        if (index < currentTopArtists.lastIndex) HorizontalDivider(modifier = Modifier.padding(start = 90.dp), color = Color.LightGray.copy(alpha = 0.3f))
+                    }
+                }
+            }
+
+            // ==========================================
+            // ГЛОБАЛЬНАЯ СТАТИСТИКА (ВНЕ ВРЕМЕНИ)
+            // ==========================================
+            if (loyaltyArtists.isNotEmpty() || bingeRecord != null) {
+                item {
+                    Spacer(modifier = Modifier.height(32.dp))
+                    // Огромный жирный разделитель, чтобы показать, что тут начинаются глобальные ачивки
+                    HorizontalDivider(thickness = 8.dp, color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f))
+                    Spacer(modifier = Modifier.height(32.dp))
+                }
+            }
+
+            // 5. ПРЕДАННОСТЬ (За всё время)
+            if (loyaltyArtists.isNotEmpty()) {
+                item {
+                    Text("Преданность (За всё время)", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Исполнители, которых вы слушаете чаще всего изо дня в день", fontSize = 12.sp, color = Color.Gray)
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+                itemsIndexed(loyaltyArtists) { index, stat ->
+                    val artistObj = remember(artists, stat.artist) { artists.find { it.name == stat.artist } }
+                    val bitmap = remember(artistObj?.photoUri) { artistObj?.photoUri?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } } }
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable { viewModel.openArtist(stat.artist); onNavigateToLibrary() }.padding(vertical = 12.dp, horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("#${index + 1}", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Color.Gray, modifier = Modifier.width(30.dp))
+                            if (bitmap != null) {
+                                androidx.compose.foundation.Image(bitmap = bitmap.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(48.dp).clip(CircleShape))
+                            } else {
+                                Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(Color.LightGray), contentAlignment = Alignment.Center) { Icon(Icons.Default.Person, contentDescription = null, tint = Color.White) }
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(stat.artist, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                                Text("Слушали ${stat.daysCount} дней", fontSize = 14.sp, color = Color.Gray)
+                            }
+                            Icon(Icons.Default.Favorite, contentDescription = null, tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                        }
+                        if (index < loyaltyArtists.lastIndex) HorizontalDivider(modifier = Modifier.padding(start = 90.dp), color = Color.LightGray.copy(alpha = 0.3f))
+                    }
+                }
+            }
+
+            // 6. ЗАЛИПАНИЕ (Рекорд повторов)
+            if (bingeRecord != null) {
+                item {
+                    Spacer(modifier = Modifier.height(24.dp))
+                    HorizontalDivider(thickness = 2.dp, color = Color.LightGray.copy(alpha = 0.2f))
+                    Spacer(modifier = Modifier.height(24.dp))
+
+                    Text("Залипание (Рекорд на репите)", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Максимальное количество воспроизведений трека подряд", fontSize = 12.sp, color = Color.Gray)
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    TrackRowItem(
+                        track = bingeRecord!!.track,
+                        coverUri = viewModel.getAlbumCoverPath(bingeRecord!!.track.artist, bingeRecord!!.track.album),
+                        isPlaying = false,
+                        trailingText = "${bingeRecord!!.statValue} раз"
+                    ) {
+                        viewModel.playTrack(bingeRecord!!.track, listOf(bingeRecord!!.track), forcedTitle = "Рекорд Залипания")
+                    }
+                }
+            }
+
+            item { Spacer(modifier = Modifier.height(80.dp)) }
+        }
+    }
+
+    if (showHeatmapDialog) {
+        HeatmapDialog(viewModel = viewModel, onDismiss = { showHeatmapDialog = false })
+    }
+}
+
+// ==========================================
+// ДИАЛОГ: ТЕПЛОВАЯ КАРТА
+// ==========================================
+@Composable
+fun HeatmapDialog(viewModel: MusicViewModel, onDismiss: () -> Unit) {
+    var selectedMode by remember { mutableIntStateOf(0) } // 0-Дни, 1-Недели, 2-Месяцы
+
+    val days by viewModel.heatmapDays.collectAsState()
+    val weeks by viewModel.heatmapWeeks.collectAsState()
+    val months by viewModel.heatmapMonths.collectAsState()
+
+    val currentData = when (selectedMode) {
+        0 -> days
+        1 -> weeks
+        else -> months
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("История прослушиваний", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                // Переключатель масштаба
+                Row(
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Color.LightGray.copy(alpha = 0.2f)),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    val modes = listOf("По дням", "По неделям", "По месяцам")
+                    modes.forEachIndexed { index, title ->
+                        val isSelected = selectedMode == index
+                        Text(
+                            text = title,
+                            fontSize = 12.sp,
+                            color = if (isSelected) Color.White else Color.Black,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
+                                .clickable { selectedMode = index }
+                                .padding(vertical = 8.dp),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                if (currentData.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxWidth().height(200.dp), contentAlignment = Alignment.Center) {
+                        Text("Нет данных", color = Color.Gray)
+                    }
+                } else {
+                    LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp)) {
+                        items(currentData) { stat ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp, horizontal = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(stat.dateLabel, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                                Text(
+                                    text = viewModel.formatMsToHoursMinutes(stat.totalMs),
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            HorizontalDivider(color = Color.LightGray.copy(alpha = 0.3f))
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Закрыть") }
+        }
+    )
 }
 
 @Composable
@@ -1057,9 +1374,16 @@ fun ArtistScreen(
     onClose: () -> Unit
 ) {
     var showAllTracks by remember { mutableStateOf(false) }
-    val displayedTracks = if (showAllTracks) artist.allTracks else artist.topTracks
+
     val currentTrack by viewModel.currentTrack.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
+
+    // --- НОВОЕ: Подтягиваем динамический топ из базы данных ---
+    val dynamicTracks by viewModel.getDynamicArtistTopTracks(artist.name).collectAsState(initial = emptyList())
+    // Если БД еще грузится или треков в истории нет, показываем дефолтные все треки
+    val finalTracks = if (dynamicTracks.isNotEmpty()) dynamicTracks else artist.allTracks
+    // Обрезаем до 5, если не нажата кнопка "Все"
+    val displayedTracks = if (showAllTracks) finalTracks else finalTracks.take(5)
 
     val photoPickerLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -1156,10 +1480,8 @@ fun ArtistScreen(
                     Spacer(modifier = Modifier.width(12.dp))
                     IconButton(
                         onClick = {
-                            val tracksToPlay =
-                                if (artist.topTracks.isNotEmpty()) artist.topTracks else artist.allTracks
-                            if (tracksToPlay.isNotEmpty()) {
-                                viewModel.playTrack(tracksToPlay.first(), tracksToPlay)
+                            if (finalTracks.isNotEmpty()) {
+                                viewModel.playTrack(finalTracks.first(), finalTracks)
                             }
                         },
                         modifier = Modifier
@@ -1507,18 +1829,10 @@ fun TrackRowItem(
     track: TrackEntity,
     coverUri: String? = null,
     isPlaying: Boolean = false,
+    trailingText: String? = null,
     onClick: () -> Unit
 ) {
-    val bitmap = remember(coverUri) {
-        coverUri?.let { path ->
-            try {
-                android.graphics.BitmapFactory.decodeFile(path)
-            } catch (e: Exception) {
-                null
-            }
-        }
-    }
-
+    val bitmap = remember(coverUri) { coverUri?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } } }
     val safeTitle = track.title?.takeIf { it.isNotBlank() } ?: track.fileName
     val safeArtist = track.artist?.takeIf { it.isNotBlank() } ?: "Неизвестный исполнитель"
 
@@ -1532,68 +1846,29 @@ fun TrackRowItem(
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (bitmap != null) {
-            androidx.compose.foundation.Image(
-                bitmap = bitmap.asImageBitmap(),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .size(52.dp)
-                    .clip(RoundedCornerShape(8.dp))
-            )
+            androidx.compose.foundation.Image(bitmap = bitmap.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
         } else {
-            Box(
-                modifier = Modifier
-                    .size(52.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(if (isPlaying) MaterialTheme.colorScheme.primary else Color.LightGray),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.MusicNote,
-                    contentDescription = null,
-                    tint = Color.White
-                )
-            }
+            Box(modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)).background(if (isPlaying) MaterialTheme.colorScheme.primary else Color.LightGray), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Default.MusicNote, contentDescription = null, tint = Color.White) }
         }
 
         Spacer(modifier = Modifier.width(14.dp))
 
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = safeTitle,
-                    fontSize = 16.sp,
-                    fontWeight = if (isPlaying) FontWeight.Bold else FontWeight.Medium,
-                    color = if (isPlaying) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false)
-                )
-
+                Text(text = safeTitle, fontSize = 16.sp, fontWeight = if (isPlaying) FontWeight.Bold else FontWeight.Medium, color = if (isPlaying) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                 if (track.isDemo || track.isUnreleased) {
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (track.isDemo) "Demo" else "Unreleased",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.Gray,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Color.Gray.copy(alpha = 0.2f))
-                            .padding(horizontal = 4.dp, vertical = 2.dp)
-                    )
+                    Text(text = if (track.isDemo) "Demo" else "Unreleased", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.Gray, modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(Color.Gray.copy(alpha = 0.2f)).padding(horizontal = 4.dp, vertical = 2.dp))
                 }
             }
-
             Spacer(modifier = Modifier.height(2.dp))
+            Text(text = safeArtist, fontSize = 14.sp, color = if (isPlaying) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
 
-            Text(
-                text = safeArtist,
-                fontSize = 14.sp,
-                color = if (isPlaying) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else Color.Gray,
-                maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-            )
+        // --- ВЫВОДИМ ЦИФРЫ ДЛЯ СТАТИСТИКИ ---
+        if (trailingText != null) {
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(text = trailingText, fontSize = 14.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
         }
     }
 }

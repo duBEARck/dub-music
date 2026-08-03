@@ -225,9 +225,6 @@ fun UnprocessedTrackItem(
 // ---------------------------------------------------------
 // ЭКРАН ПЛЕЙЛИСТОВ
 // ---------------------------------------------------------
-// ---------------------------------------------------------
-// ЭКРАН ПЛЕЙЛИСТОВ
-// ---------------------------------------------------------
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlaylistsTabScreen(viewModel: MusicViewModel) {
@@ -236,149 +233,86 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
     val customPlaylists by viewModel.allPlaylists.collectAsState(initial = emptyList<PlaylistEntity>())
 
     val currentTrack by viewModel.currentTrack.collectAsState()
-
-    var showAllTracks by remember { mutableStateOf(false) }
-    var showHiddenTracks by remember { mutableStateOf(false) }
-    var openedPlaylist by remember { mutableStateOf<PlaylistEntity?>(null) }
-    var showCreateDialog by remember { mutableStateOf(false) }
-
     val isPlaying by viewModel.isPlaying.collectAsState()
     val queueTitle by viewModel.currentQueueTitle.collectAsState()
+
+    // ЧИТАЕМ СОСТОЯНИЯ ИЗ VIEWMODEL (Для механики Tap-to-root)
+    val showAllTracks by viewModel.showAllTracksPlaylists.collectAsState()
+    val showHiddenTracks by viewModel.showHiddenTracks.collectAsState()
+    val openedPlaylist by viewModel.openedPlaylist.collectAsState()
+
+    var showCreateDialog by remember { mutableStateOf(false) }
 
     // ------------------------------------
     // 1. ЭКРАН: КАСТОМНЫЙ ПЛЕЙЛИСТ
     // ------------------------------------
     if (openedPlaylist != null) {
-        BackHandler(enabled = true) { openedPlaylist = null }
+        BackHandler(enabled = true) { viewModel.openPlaylist(null) }
 
-        val playlistTracks by viewModel.getTracksForPlaylist(openedPlaylist!!.playlistId)
-            .collectAsState(initial = emptyList<TrackEntity>())
+        val playlistTracks by viewModel.getTracksForPlaylist(openedPlaylist!!.playlistId).collectAsState(initial = emptyList<TrackEntity>())
         val totalDuration = viewModel.formatTotalDuration(playlistTracks)
         var showEditDialog by remember { mutableStateOf(false) }
         var isReorderMode by remember { mutableStateOf(false) }
 
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .statusBarsPadding() // Отступ от статус-бара для экрана плейлиста
-        ) {
+        Box(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 item {
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             IconButton(
-                                onClick = { openedPlaylist = null },
-                                modifier = Modifier.background(
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
-                                    CircleShape
-                                )
+                                onClick = { viewModel.openPlaylist(null) },
+                                modifier = Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), CircleShape)
                             ) { Icon(Icons.Default.ArrowBack, contentDescription = "Назад") }
 
                             Row {
                                 IconButton(
                                     onClick = { isReorderMode = !isReorderMode },
-                                    modifier = Modifier.background(
-                                        if (isReorderMode) MaterialTheme.colorScheme.primary.copy(
-                                            alpha = 0.3f
-                                        ) else MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
-                                        CircleShape
-                                    )
-                                ) {
-                                    Icon(
-                                        Icons.Default.SwapVert,
-                                        contentDescription = "Изменить порядок",
-                                        tint = if (isReorderMode) MaterialTheme.colorScheme.primary else LocalContentColor.current
-                                    )
-                                }
+                                    modifier = Modifier.background(if (isReorderMode) MaterialTheme.colorScheme.primary.copy(alpha = 0.3f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), CircleShape)
+                                ) { Icon(Icons.Default.SwapVert, contentDescription = "Изменить порядок", tint = if (isReorderMode) MaterialTheme.colorScheme.primary else LocalContentColor.current) }
                                 Spacer(modifier = Modifier.width(8.dp))
                                 IconButton(
                                     onClick = { showEditDialog = true },
-                                    modifier = Modifier.background(
-                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
-                                        CircleShape
-                                    )
+                                    modifier = Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), CircleShape)
                                 ) { Icon(Icons.Default.Edit, contentDescription = "Редактировать") }
                             }
                         }
 
-                        // === ИСПРАВЛЕНО ЗДЕСЬ (ШАПКА ПЛЕЙЛИСТА) ===
                         Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 32.dp)
-                                .aspectRatio(1f)
-                                .clip(RoundedCornerShape(24.dp))
-                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp).aspectRatio(1f).clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
                             contentAlignment = Alignment.Center
                         ) {
-                            val playlistBitmap = remember(openedPlaylist!!.imageUri) {
-                                openedPlaylist!!.imageUri?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } }
-                            }
-
+                            val playlistBitmap = remember(openedPlaylist!!.imageUri) { openedPlaylist!!.imageUri?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } } }
                             if (playlistBitmap != null) {
-                                Image(
-                                    bitmap = playlistBitmap.asImageBitmap(),
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
+                                Image(bitmap = playlistBitmap.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                             } else {
-                                Icon(
-                                    Icons.Default.LibraryMusic,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(120.dp),
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
+                                Icon(Icons.Default.LibraryMusic, contentDescription = null, modifier = Modifier.size(120.dp), tint = MaterialTheme.colorScheme.primary)
                             }
                         }
 
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    openedPlaylist!!.name,
-                                    fontSize = 28.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    "$totalDuration • ${playlistTracks.size} треков",
-                                    fontSize = 14.sp,
-                                    color = Color.Gray
-                                )
+                                Text(openedPlaylist!!.name, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                                Text("$totalDuration • ${playlistTracks.size} треков", fontSize = 14.sp, color = Color.Gray)
                             }
-                            val isThisPlaylistContext = queueTitle == openedPlaylist!!.name
 
+                            val isThisPlaylistContext = queueTitle == openedPlaylist!!.name
                             IconButton(
                                 onClick = {
                                     if (isThisPlaylistContext) {
                                         viewModel.togglePlayback()
                                     } else if (playlistTracks.isNotEmpty()) {
-                                        viewModel.playTrack(
-                                            playlistTracks.first(),
-                                            playlistTracks,
-                                            forcedTitle = openedPlaylist!!.name
-                                        )
+                                        viewModel.playTrack(playlistTracks.first(), playlistTracks, forcedTitle = openedPlaylist!!.name)
                                     }
                                 },
                                 modifier = Modifier.size(64.dp).background(MaterialTheme.colorScheme.primary, CircleShape)
-                            ) {
-                                Icon(
-                                    imageVector = if (isThisPlaylistContext && isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                    contentDescription = "Слушать/Пауза",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(32.dp)
-                                )
-                            }
+                            ) { Icon(imageVector = if (isThisPlaylistContext && isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = "Слушать/Пауза", tint = Color.White, modifier = Modifier.size(32.dp)) }
                         }
                     }
                 }
@@ -386,129 +320,44 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
                 itemsIndexed(playlistTracks, key = { _, track -> track.uri }) { index, track ->
                     val isPlayingThis = currentTrack?.uri == track.uri
                     val coverPath = viewModel.getAlbumCoverPath(track.artist, track.album)
-                    val bitmap = remember(coverPath) {
-                        coverPath?.let { path ->
-                            try {
-                                android.graphics.BitmapFactory.decodeFile(path)
-                            } catch (e: Exception) {
-                                null
-                            }
-                        }
-                    }
+                    val bitmap = remember(coverPath) { coverPath?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } } }
 
                     Column {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(if (isPlayingThis) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                            modifier = Modifier.fillMaxWidth().background(if (isPlayingThis) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
                                 .clickable { viewModel.playTrack(track, playlistTracks, forcedTitle = openedPlaylist!!.name) }
                                 .padding(horizontal = 16.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             if (bitmap != null) {
-                                Image(
-                                    bitmap = bitmap.asImageBitmap(),
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                )
+                                Image(bitmap = bitmap.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)))
                             } else {
-                                Box(
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(
-                                            if (isPlayingThis) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primary.copy(
-                                                alpha = 0.1f
-                                            )
-                                        ), contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        Icons.Default.MusicNote,
-                                        contentDescription = null,
-                                        tint = if (isPlayingThis) Color.White else MaterialTheme.colorScheme.primary
-                                    )
-                                }
+                                Box(modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(if (isPlayingThis) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)), contentAlignment = Alignment.Center) { Icon(Icons.Default.MusicNote, contentDescription = null, tint = if (isPlayingThis) Color.White else MaterialTheme.colorScheme.primary) }
                             }
 
                             Spacer(modifier = Modifier.width(16.dp))
 
                             Column(modifier = Modifier.weight(1f)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = track.title ?: track.fileName,
-                                        fontSize = 16.sp,
-                                        fontWeight = if (isPlayingThis) FontWeight.Bold else FontWeight.Medium,
-                                        color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 1,
-                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f, fill = false)
-                                    )
+                                    Text(text = track.title ?: track.fileName, fontSize = 16.sp, fontWeight = if (isPlayingThis) FontWeight.Bold else FontWeight.Medium, color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                                     if (track.isDemo || track.isUnreleased) {
                                         Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = if (track.isDemo) "Demo" else "Unreleased",
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = Color.Gray,
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(4.dp))
-                                                .background(Color.Gray.copy(alpha = 0.2f))
-                                                .padding(horizontal = 4.dp, vertical = 2.dp)
-                                        )
+                                        Text(text = if (track.isDemo) "Demo" else "Unreleased", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.Gray, modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(Color.Gray.copy(alpha = 0.2f)).padding(horizontal = 4.dp, vertical = 2.dp))
                                     }
                                 }
-                                Text(
-                                    text = track.artist ?: "Неизвестный исполнитель",
-                                    fontSize = 14.sp,
-                                    color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer.copy(
-                                        alpha = 0.7f
-                                    ) else Color.Gray,
-                                    maxLines = 1,
-                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                                )
+                                Text(text = track.artist ?: "Неизвестный исполнитель", fontSize = 14.sp, color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else Color.Gray, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                             }
-                            Text(
-                                text = viewModel.formatTrackDuration(track.durationMs),
-                                fontSize = 14.sp,
-                                color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer else Color.Gray
-                            )
+                            Text(text = viewModel.formatTrackDuration(track.durationMs), fontSize = 14.sp, color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer else Color.Gray)
 
                             if (isReorderMode) {
                                 Spacer(modifier = Modifier.width(16.dp))
                                 Column {
-                                    Icon(
-                                        Icons.Default.KeyboardArrowUp,
-                                        contentDescription = "Вверх",
-                                        tint = if (index > 0) Color.Gray else Color.LightGray,
-                                        modifier = Modifier.clickable(enabled = index > 0) {
-                                            viewModel.moveTrackInPlaylist(
-                                                openedPlaylist!!.playlistId,
-                                                index,
-                                                index - 1
-                                            )
-                                        })
-                                    Icon(
-                                        Icons.Default.KeyboardArrowDown,
-                                        contentDescription = "Вниз",
-                                        tint = if (index < playlistTracks.size - 1) Color.Gray else Color.LightGray,
-                                        modifier = Modifier.clickable(enabled = index < playlistTracks.size - 1) {
-                                            viewModel.moveTrackInPlaylist(
-                                                openedPlaylist!!.playlistId,
-                                                index,
-                                                index + 1
-                                            )
-                                        })
+                                    Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Вверх", tint = if (index > 0) Color.Gray else Color.LightGray, modifier = Modifier.clickable(enabled = index > 0) { viewModel.moveTrackInPlaylist(openedPlaylist!!.playlistId, index, index - 1) })
+                                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Вниз", tint = if (index < playlistTracks.size - 1) Color.Gray else Color.LightGray, modifier = Modifier.clickable(enabled = index < playlistTracks.size - 1) { viewModel.moveTrackInPlaylist(openedPlaylist!!.playlistId, index, index + 1) })
                                 }
                             }
                         }
-                        HorizontalDivider(
-                            modifier = Modifier.padding(horizontal = 16.dp),
-                            thickness = 1.dp,
-                            color = Color.LightGray.copy(alpha = 0.5f)
-                        )
+                        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), thickness = 1.dp, color = Color.LightGray.copy(alpha = 0.5f))
                     }
                 }
             }
@@ -522,13 +371,13 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
                 onDismiss = { showEditDialog = false },
                 onSave = { newName, newImg ->
                     viewModel.updatePlaylist(openedPlaylist!!, newName, newImg)
-                    openedPlaylist = openedPlaylist!!.copy(name = newName, imageUri = newImg)
+                    viewModel.openPlaylist(openedPlaylist!!.copy(name = newName, imageUri = newImg))
                     showEditDialog = false
                 },
                 onDelete = {
                     viewModel.deletePlaylist(openedPlaylist!!)
                     showEditDialog = false
-                    openedPlaylist = null
+                    viewModel.openPlaylist(null)
                 }
             )
         }
@@ -537,116 +386,46 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
     // 2. ЭКРАН: ВСЕ СКАЧАННЫЕ ТРЕКИ
     // ------------------------------------
     else if (showAllTracks) {
-        BackHandler(enabled = true) { showAllTracks = false }
+        BackHandler(enabled = true) { viewModel.setShowAllTracksPlaylists(false) }
 
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .statusBarsPadding() // Отступ от статус-бара для экрана "Все треки"
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(16.dp)
-            ) {
-                IconButton(onClick = { showAllTracks = false }) {
-                    Icon(
-                        Icons.Default.ArrowBack,
-                        contentDescription = "Назад"
-                    )
-                }
+        Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(16.dp)) {
+                IconButton(onClick = { viewModel.setShowAllTracksPlaylists(false) }) { Icon(Icons.Default.ArrowBack, contentDescription = "Назад") }
                 Text("Все скачанные треки", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(processedTracks, key = { it.uri }) { track ->
                     val isPlayingThis = currentTrack?.uri == track.uri
                     val coverPath = viewModel.getAlbumCoverPath(track.artist, track.album)
-                    val bitmap = remember(coverPath) {
-                        coverPath?.let { path ->
-                            try {
-                                android.graphics.BitmapFactory.decodeFile(path)
-                            } catch (e: Exception) {
-                                null
-                            }
-                        }
-                    }
+                    val bitmap = remember(coverPath) { coverPath?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } } }
 
                     Column {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(if (isPlayingThis) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                            modifier = Modifier.fillMaxWidth().background(if (isPlayingThis) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
                                 .clickable { viewModel.playTrack(track, processedTracks) }
                                 .padding(horizontal = 16.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             if (bitmap != null) {
-                                Image(
-                                    bitmap = bitmap.asImageBitmap(),
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                )
+                                Image(bitmap = bitmap.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)))
                             } else {
-                                Box(
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (isPlayingThis) MaterialTheme.colorScheme.primary else Color.Transparent),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        Icons.Default.Audiotrack,
-                                        contentDescription = null,
-                                        tint = if (isPlayingThis) Color.White else MaterialTheme.colorScheme.primary
-                                    )
-                                }
+                                Box(modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(if (isPlayingThis) MaterialTheme.colorScheme.primary else Color.Transparent), contentAlignment = Alignment.Center) { Icon(Icons.Default.Audiotrack, contentDescription = null, tint = if (isPlayingThis) Color.White else MaterialTheme.colorScheme.primary) }
                             }
 
                             Spacer(modifier = Modifier.width(16.dp))
 
                             Column(modifier = Modifier.weight(1f)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = track.title ?: track.fileName,
-                                        fontSize = 16.sp,
-                                        fontWeight = if (isPlayingThis) FontWeight.Bold else FontWeight.Medium,
-                                        color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 1,
-                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f, fill = false)
-                                    )
+                                    Text(text = track.title ?: track.fileName, fontSize = 16.sp, fontWeight = if (isPlayingThis) FontWeight.Bold else FontWeight.Medium, color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                                     if (track.isDemo || track.isUnreleased) {
                                         Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = if (track.isDemo) "Demo" else "Unreleased",
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = Color.Gray,
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(4.dp))
-                                                .background(Color.Gray.copy(alpha = 0.2f))
-                                                .padding(horizontal = 4.dp, vertical = 2.dp)
-                                        )
+                                        Text(text = if (track.isDemo) "Demo" else "Unreleased", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.Gray, modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(Color.Gray.copy(alpha = 0.2f)).padding(horizontal = 4.dp, vertical = 2.dp))
                                     }
                                 }
-                                Text(
-                                    text = track.artist ?: "Неизвестный исполнитель",
-                                    fontSize = 14.sp,
-                                    color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer.copy(
-                                        alpha = 0.7f
-                                    ) else Color.Gray,
-                                    maxLines = 1,
-                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                                )
+                                Text(text = track.artist ?: "Неизвестный исполнитель", fontSize = 14.sp, color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else Color.Gray, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                             }
                         }
-                        HorizontalDivider(
-                            modifier = Modifier.padding(start = 56.dp, end = 16.dp),
-                            thickness = 1.dp,
-                            color = Color.LightGray.copy(alpha = 0.5f)
-                        )
+                        HorizontalDivider(modifier = Modifier.padding(start = 56.dp, end = 16.dp), thickness = 1.dp, color = Color.LightGray.copy(alpha = 0.5f))
                     }
                 }
             }
@@ -656,65 +435,29 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
     // 3. ЭКРАН: СКРЫТЫЕ ТРЕКИ
     // ------------------------------------
     else if (showHiddenTracks) {
-        BackHandler(enabled = true) { showHiddenTracks = false }
+        BackHandler(enabled = true) { viewModel.setShowHiddenTracks(false) }
 
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .statusBarsPadding() // Отступ от статус-бара для "Скрытого"
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(16.dp)
-            ) {
-                IconButton(onClick = { showHiddenTracks = false }) {
-                    Icon(
-                        Icons.Default.ArrowBack,
-                        contentDescription = "Назад"
-                    )
-                }
+        Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(16.dp)) {
+                IconButton(onClick = { viewModel.setShowHiddenTracks(false) }) { Icon(Icons.Default.ArrowBack, contentDescription = "Назад") }
                 Text("Скрытые файлы", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
             if (hiddenTracks.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) { Text("Здесь ничего нет", color = Color.Gray) }
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Здесь ничего нет", color = Color.Gray) }
             } else {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     items(hiddenTracks, key = { it.uri }) { track ->
                         Column {
                             Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    Icons.Default.VisibilityOff,
-                                    contentDescription = null,
-                                    tint = Color.Gray
-                                )
+                                Icon(Icons.Default.VisibilityOff, contentDescription = null, tint = Color.Gray)
                                 Spacer(modifier = Modifier.width(16.dp))
-                                Text(
-                                    track.fileName,
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                IconButton(onClick = { viewModel.unhideTrack(track) }) {
-                                    Icon(
-                                        Icons.Default.Restore,
-                                        contentDescription = "Восстановить",
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
-                                }
+                                Text(track.fileName, fontSize = 16.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                                IconButton(onClick = { viewModel.unhideTrack(track) }) { Icon(Icons.Default.Restore, contentDescription = "Восстановить", tint = MaterialTheme.colorScheme.primary) }
                             }
-                            HorizontalDivider(
-                                modifier = Modifier.padding(horizontal = 16.dp),
-                                thickness = 1.dp,
-                                color = Color.LightGray.copy(alpha = 0.5f)
-                            )
+                            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), thickness = 1.dp, color = Color.LightGray.copy(alpha = 0.5f))
                         }
                     }
                 }
@@ -725,110 +468,49 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
     // 4. ГЛАВНЫЙ ЭКРАН ВКЛАДКИ
     // ------------------------------------
     else {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .statusBarsPadding() // Отступ от статус-бара для главного меню плейлистов
-        ) {
+        Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(text = "Плейлисты", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                IconButton(onClick = { showCreateDialog = true }) {
-                    Icon(
-                        Icons.Default.Add,
-                        contentDescription = "Создать плейлист"
-                    )
-                }
+                IconButton(onClick = { showCreateDialog = true }) { Icon(Icons.Default.Add, contentDescription = "Создать плейлист") }
             }
 
-            PlaylistRowItem(
-                icon = Icons.Default.LibraryMusic,
-                title = "Все скачанные треки",
-                subtitle = "${processedTracks.size} треков",
-                onClick = { showAllTracks = true })
+            PlaylistRowItem(icon = Icons.Default.LibraryMusic, title = "Все скачанные треки", subtitle = "${processedTracks.size} треков", onClick = { viewModel.setShowAllTracksPlaylists(true) })
             Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                "Мои плейлисты",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
+            Text("Мои плейлисты", fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 16.dp))
 
             LazyColumn(modifier = Modifier.weight(1f)) {
                 items(customPlaylists) { playlist ->
                     Column {
-                        // === ИСПРАВЛЕНО ЗДЕСЬ (СПИСОК ПЛЕЙЛИСТОВ) ===
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { openedPlaylist = playlist }
-                                .padding(16.dp),
+                            modifier = Modifier.fillMaxWidth().clickable { viewModel.openPlaylist(playlist) }.padding(16.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            val rowBitmap = remember(playlist.imageUri) {
-                                playlist.imageUri?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } }
-                            }
-
+                            val rowBitmap = remember(playlist.imageUri) { playlist.imageUri?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } } }
                             if (rowBitmap != null) {
-                                Image(
-                                    bitmap = rowBitmap.asImageBitmap(),
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp))
-                                )
+                                Image(bitmap = rowBitmap.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)))
                             } else {
-                                Box(
-                                    modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)).background(Color.LightGray),
-                                    contentAlignment = Alignment.Center
-                                ) { Icon(Icons.Default.MusicNote, contentDescription = null, tint = Color.White) }
+                                Box(modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)).background(Color.LightGray), contentAlignment = Alignment.Center) { Icon(Icons.Default.MusicNote, contentDescription = null, tint = Color.White) }
                             }
-
                             Spacer(modifier = Modifier.width(16.dp))
-                            Text(
-                                playlist.name,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Medium,
-                                modifier = Modifier.weight(1f)
-                            )
-                            val isThisPlaylistContext = queueTitle == playlist.name
+                            Text(playlist.name, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
 
+                            val isThisPlaylistContext = queueTitle == playlist.name
                             IconButton(
                                 onClick = {
-                                    if (isThisPlaylistContext) {
-                                        viewModel.togglePlayback()
-                                    } else {
-                                        viewModel.playPlaylistDirectly(playlist.playlistId)
-                                    }
+                                    if (isThisPlaylistContext) viewModel.togglePlayback() else viewModel.playPlaylistDirectly(playlist.playlistId)
                                 },
                                 modifier = Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), CircleShape)
-                            ) {
-                                Icon(
-                                    imageVector = if (isThisPlaylistContext && isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                    contentDescription = "Играть/Пауза",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
+                            ) { Icon(imageVector = if (isThisPlaylistContext && isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = "Играть/Пауза", tint = MaterialTheme.colorScheme.primary) }
                         }
-                        HorizontalDivider(
-                            modifier = Modifier.padding(horizontal = 16.dp),
-                            thickness = 1.dp,
-                            color = Color.LightGray.copy(alpha = 0.5f)
-                        )
+                        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), thickness = 1.dp, color = Color.LightGray.copy(alpha = 0.5f))
                     }
                 }
             }
-            PlaylistRowItem(
-                icon = Icons.Default.VisibilityOff,
-                title = "Скрытое",
-                subtitle = "${hiddenTracks.size}",
-                onClick = { showHiddenTracks = true },
-                isTransparent = true
-            )
+            PlaylistRowItem(icon = Icons.Default.VisibilityOff, title = "Скрытое", subtitle = "${hiddenTracks.size}", onClick = { viewModel.setShowHiddenTracks(true) }, isTransparent = true)
         }
     }
 
