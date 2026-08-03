@@ -109,8 +109,6 @@ class MusicService : Service() {
 
     // Эта функция будет менять песню и кнопки в шторке
     fun updateNotification(title: String, artist: String, isPlaying: Boolean) {
-
-        // --- НОВОЕ: Пытаемся загрузить обложку альбома с диска ---
         val track = currentTrackItem
         var albumBitmap: Bitmap? = null
 
@@ -121,31 +119,38 @@ class MusicService : Service() {
 
             if (coverPath != null) {
                 try {
-                    albumBitmap = BitmapFactory.decodeFile(coverPath)
+                    val originalBitmap = BitmapFactory.decodeFile(coverPath)
+                    if (originalBitmap != null) {
+                        // --- ИДЕАЛЬНОЕ КАЧЕСТВО ДЛЯ ШТОРКИ ---
+                        // 1. Делаем ровный квадрат
+                        val size = Math.min(originalBitmap.width, originalBitmap.height)
+                        val x = (originalBitmap.width - size) / 2
+                        val y = (originalBitmap.height - size) / 2
+                        val squaredBitmap = Bitmap.createBitmap(originalBitmap, x, y, size, size)
+
+                        // 2. Сжимаем до стандарта Android (512x512)
+                        albumBitmap = Bitmap.createScaledBitmap(squaredBitmap, 512, 512, true)
+                    }
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
             }
         }
 
-        // Получаем текущие данные прямо из плеера
         val duration = mediaPlayer?.duration?.toLong() ?: 0L
         val position = mediaPlayer?.currentPosition?.toLong() ?: 0L
 
-        // 1. МЕТАДАННЫЕ
         val metadataBuilder = MediaMetadataCompat.Builder()
             .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
             .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
             .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, duration)
 
-        // Если обложка нашлась, добавляем её в метаданные плеера (например, для экрана блокировки)
         if (albumBitmap != null) {
             metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, albumBitmap)
         }
 
         mediaSession.setMetadata(metadataBuilder.build())
 
-        // 2. СТАТУС ПЛЕЕРА (Говорим Android, что конкретно сейчас происходит)
         val state = if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
         val playbackState = PlaybackStateCompat.Builder()
             .setActions(
@@ -153,14 +158,12 @@ class MusicService : Service() {
                         PlaybackStateCompat.ACTION_PAUSE or
                         PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
                         PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                        PlaybackStateCompat.ACTION_SEEK_TO // Разрешаем системе дергать ползунок
+                        PlaybackStateCompat.ACTION_SEEK_TO
             )
-            // Передаем статус, текущую секунду и скорость (1.0f - нормальная скорость)
             .setState(state, position, if (isPlaying) 1.0f else 0f)
             .build()
         mediaSession.setPlaybackState(playbackState)
 
-        // 3. СБОРКА УВЕДОМЛЕНИЯ
         val playPauseIcon = if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play
 
         val prevIntent = PendingIntent.getService(this, 1, Intent(this, MusicService::class.java).apply { action = "ACTION_PREV" }, PendingIntent.FLAG_IMMUTABLE)
@@ -182,7 +185,6 @@ class MusicService : Service() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
 
-        // --- НОВОЕ: Если есть обложка, ставим её большой картинкой в уведомление ---
         if (albumBitmap != null) {
             notificationBuilder.setLargeIcon(albumBitmap)
         }

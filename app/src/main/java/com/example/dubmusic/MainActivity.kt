@@ -38,34 +38,35 @@ import android.net.Uri
 import android.os.IBinder
 import androidx.activity.viewModels
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Shuffle
-import androidx.compose.material.icons.filled.Repeat
-import androidx.compose.material.icons.filled.RepeatOne
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.Album
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.foundation.lazy.items
-import androidx.compose.ui.platform.LocalContext
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.foundation.shape.CircleShape
-import androidx.activity.enableEdgeToEdge
-
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.style.TextOverflow
 
 data class Album(
     val title: String,
@@ -74,9 +75,9 @@ data class Album(
     val coverUri: String?, // Путь к сохраненной обложке альбома
     val regularTracks: List<TrackEntity>,
     val demoTracks: List<TrackEntity>,
-    val unreleasedTracks: List<TrackEntity>, // <--- НОВОЕ
+    val unreleasedTracks: List<TrackEntity>,
     var hasDemosEnabled: Boolean = false,
-    var hasUnreleasedEnabled: Boolean = false // <--- НОВОЕ
+    var hasUnreleasedEnabled: Boolean = false
 )
 
 data class Artist(
@@ -90,6 +91,7 @@ data class Artist(
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MusicViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -99,7 +101,7 @@ class MainActivity : ComponentActivity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
 
-        // --- НОВЫЙ БЛОК: Подключение к фоновому сервису ---
+        // Подключение к фоновому сервису
         val connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
                 val binder = service as MusicService.MusicBinder
@@ -109,9 +111,9 @@ class MainActivity : ComponentActivity() {
                 viewModel.musicService?.onPrevClick = { viewModel.playPrev() }
                 viewModel.musicService?.onPlayPauseClick = { viewModel.togglePlayback() }
 
-                // --- НОВОЕ: Синхронизируем интерфейс с Сервисом! ---
                 viewModel.syncWithService()
             }
+
             override fun onServiceDisconnected(name: ComponentName?) {
                 viewModel.musicService = null
             }
@@ -119,12 +121,15 @@ class MainActivity : ComponentActivity() {
 
         val serviceIntent = Intent(this, MusicService::class.java)
         bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
+
         setContent {
-            MaterialTheme(colorScheme = lightColorScheme(
-                primary = Color(0xFF6200EA),
-                background = Color(0xFFF5F5F5),
-                surface = Color.White
-            )) {
+            MaterialTheme(
+                colorScheme = lightColorScheme(
+                    primary = Color(0xFF6200EA),
+                    background = Color(0xFFF5F5F5),
+                    surface = Color.White
+                )
+            ) {
                 MusicAppMainScreen(viewModel)
             }
         }
@@ -146,18 +151,26 @@ fun MusicAppMainScreen(viewModel: MusicViewModel) {
     val currentTime by viewModel.currentTime.collectAsState()
     val totalTime by viewModel.totalTime.collectAsState()
 
+    val currentQueue by viewModel.currentQueueFlow.collectAsState()
+    val queueTitle by viewModel.currentQueueTitle.collectAsState()
+
     val items = listOf("Волна", "Статистика", "Сохранённое", "Плейлисты")
-    val icons = listOf(Icons.Default.Waves, Icons.Default.Assessment, Icons.Default.LibraryMusic, Icons.Default.QueueMusic)
+    val icons = listOf(
+        Icons.Default.Waves,
+        Icons.Default.Assessment,
+        Icons.Default.LibraryMusic,
+        Icons.Default.QueueMusic
+    )
 
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             bottomBar = {
                 Column {
-                    // Мини-плеер (нижняя плашка)
+                    // Мини-плеер
                     currentTrack?.let { track ->
                         BottomPlayerBar(
                             track = track,
-                            viewModel = viewModel, // <--- ПЕРЕДАЕМ VIEWMODEL СЮДА
+                            viewModel = viewModel,
                             isPlaying = isPlaying,
                             progress = progress,
                             onTogglePlayback = { viewModel.togglePlayback() },
@@ -188,7 +201,6 @@ fun MusicAppMainScreen(viewModel: MusicViewModel) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    // ИСПРАВЛЕНИЕ: Оставляем отступ только снизу для мини-плеера и меню. Верх пускаем под экран!
                     .padding(bottom = innerPadding.calculateBottomPadding())
                     .background(MaterialTheme.colorScheme.background)
             ) {
@@ -206,19 +218,23 @@ fun MusicAppMainScreen(viewModel: MusicViewModel) {
         BackHandler(enabled = showFullScreenPlayer) {
             showFullScreenPlayer = false
         }
+
         AnimatedVisibility(
             visible = showFullScreenPlayer && currentTrack != null,
             enter = slideInVertically(initialOffsetY = { it }),
             exit = slideOutVertically(targetOffsetY = { it })
         ) {
             currentTrack?.let { track ->
-                val playlistsContainingTrack by viewModel.getPlaylistsForTrack(track.uri).collectAsState(initial = emptyList())
+                val playlistsContainingTrack by viewModel.getPlaylistsForTrack(track.uri)
+                    .collectAsState(initial = emptyList())
                 val playbackMode by viewModel.playbackMode.collectAsState()
                 FullScreenPlayer(
-                    viewModel = viewModel, // <--- И ПЕРЕДАЕМ VIEWMODEL СЮДА
+                    viewModel = viewModel,
                     playbackMode = playbackMode,
                     playlistsContainingTrack = playlistsContainingTrack,
                     track = track,
+                    currentQueue = currentQueue,
+                    queueTitle = queueTitle,
                     isPlaying = isPlaying,
                     progress = progress,
                     currentTime = currentTime,
@@ -231,7 +247,20 @@ fun MusicAppMainScreen(viewModel: MusicViewModel) {
                     onNext = { viewModel.playNext() },
                     onPrev = { viewModel.playPrev() },
                     onToggleMode = { viewModel.togglePlaybackMode(it) },
-                    onAddToPlaylist = { playlist -> viewModel.addTrackToPlaylist(track, playlist) }
+                    onAddToPlaylist = { playlist -> viewModel.addTrackToPlaylist(track, playlist) },
+
+                    // --- НОВЫЕ КОЛЛБЭКИ ДЛЯ ПЕРЕХОДОВ ---
+                    onNavigateToAlbum = { albumTitle ->
+                        selectedItem = 1 // Переключаем нижнее меню на "Статистику"
+                        viewModel.openArtist(track.artist) // Подгружаем артиста как фон
+                        viewModel.openAlbum(albumTitle) // Поверх открываем альбом
+                        showFullScreenPlayer = false // Сворачиваем плеер
+                    },
+                    onNavigateToArtist = { artistName ->
+                        selectedItem = 1 // Переключаем нижнее меню на "Статистику"
+                        viewModel.openArtist(artistName) // Открываем артиста
+                        showFullScreenPlayer = false // Сворачиваем плеер
+                    }
                 )
             }
         }
@@ -252,18 +281,21 @@ fun MusicAppMainScreen(viewModel: MusicViewModel) {
 @Composable
 fun BottomPlayerBar(
     track: TrackEntity,
-    viewModel: MusicViewModel, // Добавили параметр
+    viewModel: MusicViewModel,
     isPlaying: Boolean,
     progress: Float,
     onTogglePlayback: () -> Unit,
     onNext: () -> Unit,
     onOpenFullScreen: () -> Unit
 ) {
-    // Пытаемся найти и загрузить обложку альбома
     val coverPath = viewModel.getAlbumCoverPath(track.artist, track.album)
     val bitmap = remember(coverPath) {
         coverPath?.let { path ->
-            try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null }
+            try {
+                android.graphics.BitmapFactory.decodeFile(path)
+            } catch (e: Exception) {
+                null
+            }
         }
     }
 
@@ -275,12 +307,19 @@ fun BottomPlayerBar(
             .clickable { onOpenFullScreen() }
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp).padding(vertical = 8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 4.dp)
+                .padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // --- ОБЛОЖКА ИЛИ ЗАГЛУШКА ---
             Box(
-                modifier = Modifier.size(48.dp).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), RoundedCornerShape(8.dp)),
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
+                        RoundedCornerShape(8.dp)
+                    ),
                 contentAlignment = Alignment.Center
             ) {
                 if (bitmap != null) {
@@ -288,18 +327,50 @@ fun BottomPlayerBar(
                         bitmap = bitmap.asImageBitmap(),
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(8.dp))
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(8.dp))
                     )
                 } else {
-                    Icon(Icons.Default.MusicNote, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Icon(
+                        Icons.Default.MusicNote,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
                 }
             }
 
             Spacer(modifier = Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(text = track.title ?: track.fileName, fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 1)
-                Text(text = track.artist ?: "Неизвестный", fontSize = 14.sp, color = Color.Gray, maxLines = 1)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = track.title ?: track.fileName,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (track.isDemo || track.isUnreleased) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (track.isDemo) "Demo" else "Unreleased",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.Gray,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color.Gray.copy(alpha = 0.2f))
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+                Text(
+                    text = track.artist ?: "Неизвестный",
+                    fontSize = 14.sp,
+                    color = Color.Gray,
+                    maxLines = 1
+                )
             }
 
             IconButton(onClick = onTogglePlayback) {
@@ -322,23 +393,24 @@ fun BottomPlayerBar(
         }
         LinearProgressIndicator(
             progress = { progress },
-            modifier = Modifier.fillMaxWidth().height(2.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(2.dp),
             color = MaterialTheme.colorScheme.primary,
             trackColor = Color.Transparent
         )
     }
 }
 
-// ---------------------------------------------------------
-// ПОЛНОЭКРАННЫЙ ПЛЕЕР
-// ---------------------------------------------------------
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun FullScreenPlayer(
-    viewModel: MusicViewModel, // Добавили параметр
+    viewModel: MusicViewModel,
     playbackMode: PlaybackMode,
     playlistsContainingTrack: List<Int>,
     track: TrackEntity,
+    currentQueue: List<TrackEntity>,
+    queueTitle: String,
     isPlaying: Boolean,
     progress: Float,
     currentTime: String,
@@ -351,184 +423,529 @@ fun FullScreenPlayer(
     onNext: () -> Unit,
     onPrev: () -> Unit,
     onToggleMode: (PlaybackMode) -> Unit,
-    onAddToPlaylist: (PlaylistEntity) -> Unit
+    onAddToPlaylist: (PlaylistEntity) -> Unit,
+    onNavigateToAlbum: (String) -> Unit = {},
+    onNavigateToArtist: (String) -> Unit = {}
 ) {
     var offsetY by remember { mutableFloatStateOf(0f) }
     var showPlaylistSelector by remember { mutableStateOf(false) }
+    var showQueue by remember { mutableStateOf(false) }
 
-    // Пытаемся найти и загрузить обложку альбома
-    val coverPath = viewModel.getAlbumCoverPath(track.artist, track.album)
-    val bitmap = remember(coverPath) {
-        coverPath?.let { path ->
-            try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null }
-        }
+    // 1. ПЕРЕХВАТ СИСТЕМНОГО ЖЕСТА "НАЗАД"
+    androidx.activity.compose.BackHandler(enabled = showQueue) {
+        showQueue = false
     }
 
-    Column(
+    val artists by viewModel.artistsList.collectAsState()
+    val artistPhotoUri = remember(artists, track.artist) {
+        artists.find { it.name == track.artist }?.photoUri
+    }
+    val artistBitmap = remember(artistPhotoUri) {
+        artistPhotoUri?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } }
+    }
+
+    // --- BOX-ОБЕРТКА ---
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .offset { IntOffset(0, offsetY.roundToInt()) }
             .pointerInput(Unit) {
                 detectVerticalDragGestures(
-                    onDragEnd = {
-                        if (offsetY > 300f) onClose() else offsetY = 0f
+                    onDragEnd = { if (offsetY > 300f) onClose() else offsetY = 0f }
+                ) { _, dragAmount -> if (dragAmount > 0 || offsetY > 0) offsetY += dragAmount }
+            }
+            // Чтобы системный жест Назад всё ещё работал (раньше был конфликт с открытием очереди)
+            .pointerInput(Unit) {
+                // Получаем ширину экрана. Мертвая зона = 120 пикселей (хватает для жеста Назад)
+                val screenWidth = size.width
+                val edgeZone = 120f
+                var startX = 0f // Здесь будем хранить точку старта касания
+
+                detectHorizontalDragGestures(
+                    onDragStart = { offset ->
+                        startX = offset.x // Запоминаем, где палец коснулся экрана
+                    },
+                    onHorizontalDrag = { _, dragAmount ->
+                        // Если свайп начат НЕ у левого и НЕ у правого края
+                        if (startX > edgeZone && startX < screenWidth - edgeZone) {
+                            if (dragAmount < -15f) { // Потянули влево
+                                showQueue = true
+                            }
+                        }
                     }
-                ) { _, dragAmount ->
-                    if (dragAmount > 0 || offsetY > 0) offsetY += dragAmount
-                }
-            }
-            .padding(top = 48.dp, bottom = 32.dp, start = 24.dp, end = 24.dp)
-    ) {
-        IconButton(onClick = onClose) { Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Свернуть", modifier = Modifier.size(36.dp)) }
-        Spacer(modifier = Modifier.height(24.dp))
-
-        // --- БОЛЬШАЯ ОБЛОЖКА ИЛИ ЗАГЛУШКА ---
-        Box(
-            modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)).shadow(4.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            if (bitmap != null) {
-                androidx.compose.foundation.Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
                 )
-            } else {
-                Icon(Icons.Default.MusicNote, contentDescription = null, modifier = Modifier.size(120.dp), tint = MaterialTheme.colorScheme.primary)
             }
-        }
-
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = track.title ?: track.fileName, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                Text(text = track.artist ?: "Неизвестный исполнитель", fontSize = 16.sp, color = Color.Gray, maxLines = 1)
-            }
-
-            var showMenu by remember { mutableStateOf(false) }
-            Box {
-                IconButton(onClick = { showMenu = true }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "Опции")
-                }
-                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                    DropdownMenuItem(text = { Text("Изменить информацию") }, onClick = { showMenu = false; onEdit() })
-                    DropdownMenuItem(text = { Text("Добавить в плейлист") }, onClick = { showMenu = false; showPlaylistSelector = true })
-                }
-            }
-        }
-        Spacer(modifier = Modifier.height(32.dp))
-        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(text = currentTime, fontSize = 12.sp, color = Color.Gray)
-            Text(text = totalTime, fontSize = 12.sp, color = Color.Gray)
-        }
-        Slider(value = progress, onValueChange = onSeek, modifier = Modifier.fillMaxWidth(), colors = SliderDefaults.colors(thumbColor = MaterialTheme.colorScheme.primary, activeTrackColor = MaterialTheme.colorScheme.primary))
-        Spacer(modifier = Modifier.height(8.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onPrev) { Icon(Icons.Default.SkipPrevious, contentDescription = "Назад", modifier = Modifier.size(48.dp)) }
-            IconButton(onClick = onTogglePlayback, modifier = Modifier.size(80.dp)) { Icon(imageVector = if (isPlaying) Icons.Default.PauseCircle else Icons.Default.PlayCircle, contentDescription = "Play/Pause", modifier = Modifier.fillMaxSize(), tint = MaterialTheme.colorScheme.primary) }
-            IconButton(onClick = onNext) { Icon(Icons.Default.SkipNext, contentDescription = "Вперед", modifier = Modifier.size(48.dp)) }
-        }
-        Spacer(modifier = Modifier.weight(1f))
-
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
+    ) {
+        // --- ОСНОВНОЙ ПЛЕЕР ---
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            val isShuffle = playbackMode == PlaybackMode.SHUFFLE
-            IconButton(
-                onClick = { onToggleMode(PlaybackMode.SHUFFLE) },
-                modifier = Modifier.background(if (isShuffle) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent, CircleShape)
+            // ШАПКА
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp)
+                    .offset(y = 16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.Shuffle, contentDescription = "Случайный порядок", tint = if (isShuffle) MaterialTheme.colorScheme.primary else Color.Gray)
+                IconButton(onClick = onClose) {
+                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Свернуть", modifier = Modifier.size(36.dp))
+                }
+                IconButton(onClick = { showQueue = true }) {
+                    Icon(Icons.Default.QueueMusic, contentDescription = "Очередь", modifier = Modifier.size(32.dp), tint = MaterialTheme.colorScheme.onSurface)
+                }
             }
 
-            val isRepeatAll = playbackMode == PlaybackMode.REPEAT_ALL
-            IconButton(
-                onClick = { onToggleMode(PlaybackMode.REPEAT_ALL) },
-                modifier = Modifier.background(if (isRepeatAll) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent, CircleShape)
-            ) {
-                Icon(Icons.Default.Repeat, contentDescription = "По кругу", tint = if (isRepeatAll) MaterialTheme.colorScheme.primary else Color.Gray)
+            // КАРУСЕЛЬ
+            val validQueueSize = if (currentQueue.isNotEmpty()) currentQueue.size else 1
+            val initialIndex = remember(track, currentQueue) {
+                val idx = currentQueue.indexOf(track)
+                if (idx != -1) idx else 0
             }
 
-            val isRepeatOne = playbackMode == PlaybackMode.REPEAT_ONE
-            IconButton(
-                onClick = { onToggleMode(PlaybackMode.REPEAT_ONE) },
-                modifier = Modifier.background(if (isRepeatOne) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent, CircleShape)
+            val pagerState = rememberPagerState(
+                initialPage = initialIndex,
+                pageCount = { validQueueSize }
+            )
+
+            LaunchedEffect(track) {
+                val newIndex = currentQueue.indexOf(track)
+                if (newIndex != -1 && pagerState.currentPage != newIndex) {
+                    pagerState.animateScrollToPage(newIndex)
+                }
+            }
+
+            LaunchedEffect(pagerState.settledPage) {
+                val indexInQueue = currentQueue.indexOf(track)
+                if (pagerState.settledPage != indexInQueue && indexInQueue != -1 && currentQueue.isNotEmpty()) {
+                    viewModel.playTrack(currentQueue[pagerState.settledPage], currentQueue)
+                }
+            }
+
+            HorizontalPager(
+                state = pagerState,
+                contentPadding = PaddingValues(horizontal = 40.dp),
+                pageSpacing = 0.dp,
+                modifier = Modifier.fillMaxWidth().wrapContentHeight()
+            ) { page ->
+                if (currentQueue.isEmpty()) return@HorizontalPager
+
+                val pageTrack = currentQueue[page]
+                val pageCoverPath = viewModel.getAlbumCoverPath(pageTrack.artist, pageTrack.album)
+                val pageBitmap = remember(pageCoverPath) {
+                    pageCoverPath?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } }
+                }
+
+                val pageOffset = (pagerState.currentPage - page) + pagerState.currentPageOffsetFraction
+                val scale = 1f - (0.15f * kotlin.math.abs(pageOffset)).coerceIn(0f, 1f)
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1f)
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            alpha = if (scale < 1f) 0.5f + (0.5f * scale) else 1f
+                        }
+                        .shadow(12.dp, RoundedCornerShape(24.dp))
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Color.DarkGray),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (pageBitmap != null) {
+                        Image(
+                            bitmap = pageBitmap.asImageBitmap(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Icon(Icons.Default.MusicNote, contentDescription = null, modifier = Modifier.size(100.dp), tint = Color.White)
+                    }
+                }
+            }
+
+            // ИНФО О ТРЕКЕ
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.RepeatOne, contentDescription = "Повторять один", tint = if (isRepeatOne) MaterialTheme.colorScheme.primary else Color.Gray)
+                if (artistBitmap != null) {
+                    Image(
+                        bitmap = artistBitmap.asImageBitmap(),
+                        contentDescription = "Артист",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.size(56.dp).clip(CircleShape).clickable { track.artist?.let { onNavigateToArtist(it) } }
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier.size(56.dp).clip(CircleShape).background(Color.LightGray).clickable { track.artist?.let { onNavigateToArtist(it) } },
+                        contentAlignment = Alignment.Center
+                    ) { Icon(Icons.Default.Person, contentDescription = null, tint = Color.White) }
+                }
+
+                Spacer(modifier = Modifier.width(16.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    // Оборачиваем название и тег в Row
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = track.title ?: track.fileName,
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .clickable { track.album?.let { onNavigateToAlbum(it) } }
+                        )
+                        if (track.isDemo || track.isUnreleased) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (track.isDemo) "Demo" else "Unreleased",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.Gray,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(Color.Gray.copy(alpha = 0.2f))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    Text(text = track.artist ?: "Неизвестный исполнитель", fontSize = 16.sp, color = Color.Gray, maxLines = 1)
+                }
+
+                var showMenu by remember { mutableStateOf(false) }
+                Box {
+                    IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "Опции") }
+                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                        DropdownMenuItem(text = { Text("Изменить информацию") }, onClick = { showMenu = false; onEdit() })
+                        DropdownMenuItem(text = { Text("Добавить в плейлист") }, onClick = { showMenu = false; showPlaylistSelector = true })
+                    }
+                }
+            }
+
+            // ВРЕМЯ И ПОЛЗУНОК
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(text = currentTime, fontSize = 12.sp, color = Color.Gray)
+                    Text(text = totalTime, fontSize = 12.sp, color = Color.Gray)
+                }
+                Slider(
+                    value = progress,
+                    onValueChange = onSeek,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                    colors = SliderDefaults.colors(thumbColor = MaterialTheme.colorScheme.primary, activeTrackColor = MaterialTheme.colorScheme.primary)
+                )
+            }
+
+            // КНОПКИ УПРАВЛЕНИЯ
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onPrev) { Icon(Icons.Default.SkipPrevious, contentDescription = "Назад", modifier = Modifier.size(48.dp)) }
+                IconButton(onClick = onTogglePlayback, modifier = Modifier.size(80.dp)) { Icon(imageVector = if (isPlaying) Icons.Default.PauseCircle else Icons.Default.PlayCircle, contentDescription = "Play/Pause", modifier = Modifier.fillMaxSize(), tint = MaterialTheme.colorScheme.primary) }
+                IconButton(onClick = onNext) { Icon(Icons.Default.SkipNext, contentDescription = "Вперед", modifier = Modifier.size(48.dp)) }
+            }
+
+            // НИЖНИЕ КНОПКИ РЕЖИМОВ
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val isShuffle = playbackMode == PlaybackMode.SHUFFLE
+                IconButton(onClick = { onToggleMode(PlaybackMode.SHUFFLE) }, modifier = Modifier.background(if (isShuffle) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent, CircleShape)) { Icon(Icons.Default.Shuffle, contentDescription = "Случайный порядок", tint = if (isShuffle) MaterialTheme.colorScheme.primary else Color.Gray) }
+                val isRepeatAll = playbackMode == PlaybackMode.REPEAT_ALL
+                IconButton(onClick = { onToggleMode(PlaybackMode.REPEAT_ALL) }, modifier = Modifier.background(if (isRepeatAll) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent, CircleShape)) { Icon(Icons.Default.Repeat, contentDescription = "По кругу", tint = if (isRepeatAll) MaterialTheme.colorScheme.primary else Color.Gray) }
+                val isRepeatOne = playbackMode == PlaybackMode.REPEAT_ONE
+                IconButton(onClick = { onToggleMode(PlaybackMode.REPEAT_ONE) }, modifier = Modifier.background(if (isRepeatOne) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent, CircleShape)) { Icon(Icons.Default.RepeatOne, contentDescription = "Повторять один", tint = if (isRepeatOne) MaterialTheme.colorScheme.primary else Color.Gray) }
             }
         }
-    }
 
-    if (showPlaylistSelector) {
-        AlertDialog(
-            onDismissRequest = { showPlaylistSelector = false },
-            title = { Text("Выберите плейлист", fontWeight = FontWeight.Bold) },
-            text = {
-                if (playlists.isEmpty()) {
-                    Text("У вас пока нет плейлистов", color = Color.Gray)
-                } else {
-                    androidx.compose.foundation.lazy.LazyColumn {
-                        items(playlists.size) { index ->
-                            val playlist = playlists[index]
-                            val isAlreadyAdded = playlistsContainingTrack.contains(playlist.playlistId)
-
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        if (!isAlreadyAdded) {
-                                            onAddToPlaylist(playlist)
-                                        }
-                                        showPlaylistSelector = false
-                                    }
-                                    .padding(vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(text = playlist.name, fontSize = 18.sp)
-
-                                if (isAlreadyAdded) {
-                                    Icon(
-                                        imageVector = Icons.Default.Check,
-                                        contentDescription = "Добавлено",
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
+        if (showPlaylistSelector) {
+            AlertDialog(
+                onDismissRequest = { showPlaylistSelector = false },
+                title = { Text("Выберите плейлист", fontWeight = FontWeight.Bold) },
+                text = {
+                    if (playlists.isEmpty()) {
+                        Text("У вас пока нет плейлистов", color = Color.Gray)
+                    } else {
+                        LazyColumn {
+                            items(playlists.size) { index ->
+                                val playlist = playlists[index]
+                                val isAlreadyAdded = playlistsContainingTrack.contains(playlist.playlistId)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { if (!isAlreadyAdded) { onAddToPlaylist(playlist) }; showPlaylistSelector = false }
+                                        .padding(vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(text = playlist.name, fontSize = 18.sp)
+                                    if (isAlreadyAdded) Icon(imageVector = Icons.Default.Check, contentDescription = "Добавлено", tint = MaterialTheme.colorScheme.primary)
                                 }
                             }
                         }
                     }
+                },
+                confirmButton = { TextButton(onClick = { showPlaylistSelector = false }) { Text("Отмена") } }
+            )
+        }
+
+        // --- БОКОВАЯ ШТОРКА ОЧЕРЕДИ ---
+        AnimatedVisibility(
+            visible = showQueue,
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.4f))
+                    .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { showQueue = false }
+            )
+        }
+
+        AnimatedVisibility(
+            visible = showQueue,
+            enter = slideInHorizontally(initialOffsetX = { fullWidth -> fullWidth }),
+            exit = slideOutHorizontally(targetOffsetX = { fullWidth -> fullWidth }),
+            modifier = Modifier.align(Alignment.CenterEnd)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(0.85f)
+                    .shadow(16.dp)
+                    // 2. СЕРО-ФИОЛЕТОВЫЙ ФОН: Используем системный вариант Material 3
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .pointerInput(Unit) {
+                        detectHorizontalDragGestures { _, dragAmount ->
+                            if (dragAmount > 15f) { showQueue = false } // Свайп вправо
+                        }
+                    }
+                    .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { }
+                    .statusBarsPadding()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp), // Убрали гигантский отступ сверху и снизу
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = { showQueue = false }) {
+                        Icon(Icons.Default.ArrowForward, contentDescription = "Скрыть очередь")
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Очередь", fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = { showPlaylistSelector = false }) { Text("Отмена") }
+
+                // 3. НОВЫЙ БЛОК: ХЕДЕР ОЧЕРЕДИ С КАРТИНКОЙ И ВЫДЕЛЕНИЕМ
+                val isAllDownloaded = (queueTitle == "Все скачанные треки")
+                val isArtistTracks = queueTitle.startsWith("Треки: ")
+                val matchedPlaylist = if (!isAllDownloaded && !isArtistTracks) playlists.find { it.name == queueTitle } else null
+
+                // 1. Ищем фото артиста, если сейчас играют его треки
+                val headerArtistPhotoUri = remember(artists, queueTitle, isArtistTracks) {
+                    if (isArtistTracks) {
+                        val artistName = queueTitle.removePrefix("Треки: ").trim()
+                        artists.find { it.name == artistName }?.photoUri
+                    } else null
+                }
+
+                // 2. Ищем обложку плейлиста или альбома
+                // Берём путь к файлу ТОЛЬКО если это не "Все скачанные треки"
+                val headerCoverPath = matchedPlaylist?.imageUri ?: if (!isAllDownloaded && !isArtistTracks) viewModel.getAlbumCoverPath(track.artist, track.album) else null
+
+                // 3. Декодируем итоговую картинку (либо артист, либо обложка)
+                val headerBitmap = remember(headerCoverPath, headerArtistPhotoUri) {
+                    val finalPath = headerArtistPhotoUri ?: headerCoverPath
+                    finalPath?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.Black.copy(alpha = 0.05f))
+                        .padding(horizontal = 16.dp, vertical = 16.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+
+                        // 1. Если это "Все скачанные треки"
+                        if (isAllDownloaded) {
+                            Box(
+                                modifier = Modifier
+                                    .size(80.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(MaterialTheme.colorScheme.primary),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.LibraryMusic, contentDescription = null, tint = Color.White, modifier = Modifier.size(44.dp))
+                            }
+                        }
+                        // 2. Если есть картинка (плейлиста, альбома или артиста)
+                        else if (headerBitmap != null) {
+                            Image(
+                                bitmap = headerBitmap.asImageBitmap(),
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                // Фото артиста тоже будет стильно скругленным!
+                                modifier = Modifier.size(80.dp).clip(RoundedCornerShape(12.dp)).shadow(4.dp)
+                            )
+                        }
+                        // 3. Дефолтная заглушка (если это артист без фото - иконка человека, иначе - иконка альбома)
+                        else {
+                            Box(
+                                modifier = Modifier.size(80.dp).clip(RoundedCornerShape(12.dp)).background(Color.LightGray),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (isArtistTracks) Icons.Default.Person else Icons.Default.Album,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(40.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        Column {
+                            Text("Источник", fontSize = 14.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(text = queueTitle, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(text = "${currentQueue.size} треков", fontSize = 16.sp, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+
+                // СПИСОК ТРЕКОВ
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    itemsIndexed(currentQueue) { _, queueTrack ->
+                        val isPlayingThis = (track.uri == queueTrack.uri)
+                        val queueCoverPath = viewModel.getAlbumCoverPath(queueTrack.artist, queueTrack.album)
+                        val queueBitmap = remember(queueCoverPath) {
+                            queueCoverPath?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } }
+                        }
+
+                        Column {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(if (isPlayingThis) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
+                                    .clickable {
+                                        viewModel.playTrack(queueTrack, currentQueue)
+                                        showQueue = false
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (queueBitmap != null) {
+                                    Image(
+                                        bitmap = queueBitmap.asImageBitmap(),
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(if (isPlayingThis) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
+                                        contentAlignment = Alignment.Center
+                                    ) { Icon(Icons.Default.MusicNote, contentDescription = null, tint = if (isPlayingThis) Color.White else MaterialTheme.colorScheme.primary) }
+                                }
+
+                                Spacer(modifier = Modifier.width(16.dp))
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = queueTrack.title ?: queueTrack.fileName,
+                                            fontSize = 16.sp,
+                                            fontWeight = if (isPlayingThis) FontWeight.Bold else FontWeight.Medium,
+                                            color = if (isPlayingThis) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
+                                        )
+                                        if (queueTrack.isDemo || queueTrack.isUnreleased) {
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = if (queueTrack.isDemo) "Demo" else "Unreleased",
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color.Gray,
+                                                modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(Color.Gray.copy(alpha = 0.2f)).padding(horizontal = 4.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+
+                                    Text(
+                                        text = queueTrack.artist ?: "Неизвестный исполнитель",
+                                        fontSize = 14.sp,
+                                        color = if (isPlayingThis) MaterialTheme.colorScheme.primary.copy(alpha = 0.8f) else Color.Gray,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(16.dp))
+
+                                Text(
+                                    text = viewModel.formatTrackDuration(queueTrack.durationMs),
+                                    fontSize = 14.sp,
+                                    color = if (isPlayingThis) MaterialTheme.colorScheme.primary else Color.Gray
+                                )
+                            }
+                            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), thickness = 1.dp, color = Color.LightGray.copy(alpha = 0.3f))
+                        }
+                    }
+                    item { Spacer(modifier = Modifier.height(32.dp)) }
+                }
             }
+        }
+    }
+}
+
+@Composable
+fun StubScreen(title: String, subtitle: String) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(text = title, fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+        Text(
+            text = subtitle,
+            fontSize = 16.sp,
+            color = Color.Gray,
+            modifier = Modifier.padding(top = 8.dp)
         )
     }
 }
-// Заглушка (оставь ее внизу)
-@Composable
-fun StubScreen(title: String, subtitle: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center) {
-        Text(text = title, fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.Black)
-        Text(text = subtitle, fontSize = 16.sp, color = Color.Gray, modifier = Modifier.padding(top = 8.dp))
-    }
-}
-
 
 @Composable
 fun StatsTabScreen(viewModel: MusicViewModel) {
-    // Храним только имена открытых карточек
-    var openedArtistName by remember { mutableStateOf<String?>(null) }
-    var openedAlbumTitle by remember { mutableStateOf<String?>(null) }
+    // Читаем глобальные состояния из ViewModel
+    val openedArtistName by viewModel.openedArtistName.collectAsState()
+    val openedAlbumTitle by viewModel.openedAlbumTitle.collectAsState()
 
     val artists by viewModel.artistsList.collectAsState()
 
-    // Динамически ищем актуальные данные прямо из списка ViewModel
     val currentArtist = remember(artists, openedArtistName) {
         artists.find { it.name == openedArtistName }
     }
@@ -537,30 +954,25 @@ fun StatsTabScreen(viewModel: MusicViewModel) {
         currentArtist?.albums?.find { it.title == openedAlbumTitle }
     }
 
-    // 1. Если открыт альбом
     if (currentAlbum != null) {
-        BackHandler { openedAlbumTitle = null }
-
+        BackHandler { viewModel.openAlbum(null) } // Закрываем через ViewModel
         AlbumScreen(
             album = currentAlbum,
             viewModel = viewModel,
-            onClose = { openedAlbumTitle = null }
-        )
-    }
-    // 2. Если открыт артист
-    else if (currentArtist != null) {
-        BackHandler { openedArtistName = null }
-
+            onClose = { viewModel.openAlbum(null) })
+    } else if (currentArtist != null) {
+        BackHandler { viewModel.openArtist(null) }
         ArtistScreen(
             artist = currentArtist,
             viewModel = viewModel,
-            onAlbumClick = { album -> openedAlbumTitle = album.title },
-            onClose = { openedArtistName = null }
-        )
-    }
-    // 3. Главный список всех артистов
-    else {
-        Column(modifier = Modifier.fillMaxSize()) {
+            onAlbumClick = { album -> viewModel.openAlbum(album.title) },
+            onClose = { viewModel.openArtist(null) })
+    } else {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+        ) {
             Text(
                 text = "Моя медиатека",
                 fontSize = 24.sp,
@@ -575,17 +987,20 @@ fun StatsTabScreen(viewModel: MusicViewModel) {
             } else {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     items(artists) { artist ->
-
                         val bitmap = remember(artist.photoUri) {
                             artist.photoUri?.let { path ->
-                                try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null }
+                                try {
+                                    android.graphics.BitmapFactory.decodeFile(path)
+                                } catch (e: Exception) {
+                                    null
+                                }
                             }
                         }
 
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { openedArtistName = artist.name } // Сохраняем ИМЯ артиста
+                                .clickable { viewModel.openArtist(artist.name) } // Открываем через ViewModel
                                 .padding(16.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -593,29 +1008,31 @@ fun StatsTabScreen(viewModel: MusicViewModel) {
                                 androidx.compose.foundation.Image(
                                     bitmap = bitmap.asImageBitmap(),
                                     contentDescription = "Фото исполнителя",
-                                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                    contentScale = ContentScale.Crop,
                                     modifier = Modifier
                                         .size(56.dp)
-                                        .clip(androidx.compose.foundation.shape.CircleShape)
+                                        .clip(CircleShape)
                                 )
                             } else {
                                 Box(
                                     modifier = Modifier
                                         .size(56.dp)
-                                        .clip(androidx.compose.foundation.shape.CircleShape)
+                                        .clip(CircleShape)
                                         .background(Color.LightGray),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Icon(Icons.Default.Person, contentDescription = null, tint = Color.White)
+                                    Icon(
+                                        Icons.Default.Person,
+                                        contentDescription = null,
+                                        tint = Color.White
+                                    )
                                 }
                             }
-
                             Spacer(modifier = Modifier.width(16.dp))
-
                             Column {
                                 Text(artist.name, fontSize = 18.sp, fontWeight = FontWeight.Medium)
                                 Text(
-                                    text = "${artist.albums.size} альбомов • ${artist.allTracks.size} треков",
+                                    "${artist.albums.size} релизов • ${artist.allTracks.size} треков",
                                     fontSize = 14.sp,
                                     color = Color.Gray
                                 )
@@ -641,32 +1058,30 @@ fun ArtistScreen(
 ) {
     var showAllTracks by remember { mutableStateOf(false) }
     val displayedTracks = if (showAllTracks) artist.allTracks else artist.topTracks
-
-    // Считываем текущую играющую песню из ViewModel
     val currentTrack by viewModel.currentTrack.collectAsState()
+    val isPlaying by viewModel.isPlaying.collectAsState()
 
-    val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        uri?.let { viewModel.setArtistPhoto(artist.name, it) }
-    }
+    val photoPickerLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+            uri?.let { viewModel.setArtistPhoto(artist.name, it) }
+        }
 
     val bitmap = remember(artist.photoUri) {
         artist.photoUri?.let { path ->
-            try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null }
+            try {
+                android.graphics.BitmapFactory.decodeFile(path)
+            } catch (e: Exception) {
+                null
+            }
         }
     }
 
     LazyColumn(modifier = Modifier.fillMaxSize()) {
-
-        // ШАПКА АРТИСТА
         item {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(280.dp)
-                    .background(Color.DarkGray)
-            ) {
+            Box(modifier = Modifier
+                .fillMaxWidth()
+                .height(280.dp)
+                .background(Color.DarkGray)) {
                 if (bitmap != null) {
                     androidx.compose.foundation.Image(
                         bitmap = bitmap.asImageBitmap(),
@@ -679,7 +1094,9 @@ fun ArtistScreen(
                         imageVector = Icons.Default.Person,
                         contentDescription = null,
                         tint = Color.White.copy(alpha = 0.4f),
-                        modifier = Modifier.size(100.dp).align(Alignment.Center)
+                        modifier = Modifier
+                            .size(100.dp)
+                            .align(Alignment.Center)
                     )
                 }
 
@@ -699,16 +1116,25 @@ fun ArtistScreen(
 
                 Row(
                     modifier = Modifier
+                        .align(Alignment.TopStart)
                         .fillMaxWidth()
-                        .padding(top = 12.dp, start = 8.dp, end = 8.dp)
-                        .align(Alignment.TopStart),
+                        .statusBarsPadding() // Отступ для кнопок, чтобы картинка осталась сзади
+                        .padding(top = 12.dp, start = 8.dp, end = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     IconButton(onClick = onClose) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Назад", tint = Color.White)
+                        Icon(
+                            Icons.Default.ArrowBack,
+                            contentDescription = "Назад",
+                            tint = Color.White
+                        )
                     }
                     IconButton(onClick = { photoPickerLauncher.launch("image/*") }) {
-                        Icon(Icons.Default.Edit, contentDescription = "Изменить фото", tint = Color.White)
+                        Icon(
+                            Icons.Default.Edit,
+                            contentDescription = "Изменить фото",
+                            tint = Color.White
+                        )
                     }
                 }
 
@@ -727,12 +1153,11 @@ fun ArtistScreen(
                         color = Color.White,
                         modifier = Modifier.weight(1f)
                     )
-
                     Spacer(modifier = Modifier.width(12.dp))
-
                     IconButton(
                         onClick = {
-                            val tracksToPlay = if (artist.topTracks.isNotEmpty()) artist.topTracks else artist.allTracks
+                            val tracksToPlay =
+                                if (artist.topTracks.isNotEmpty()) artist.topTracks else artist.allTracks
                             if (tracksToPlay.isNotEmpty()) {
                                 viewModel.playTrack(tracksToPlay.first(), tracksToPlay)
                             }
@@ -743,7 +1168,7 @@ fun ArtistScreen(
                             .background(MaterialTheme.colorScheme.primary)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.PlayArrow,
+                            Icons.Default.PlayArrow,
                             contentDescription = "Играть",
                             tint = Color.White,
                             modifier = Modifier.size(32.dp)
@@ -753,11 +1178,12 @@ fun ArtistScreen(
             }
         }
 
-        // ПОПУЛЯРНЫЕ ТРЕКИ
         item {
             Spacer(modifier = Modifier.height(16.dp))
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -766,10 +1192,12 @@ fun ArtistScreen(
                     fontSize = 20.sp,
                     fontWeight = FontWeight.SemiBold
                 )
-
                 if (artist.allTracks.size > 5) {
                     TextButton(onClick = { showAllTracks = !showAllTracks }) {
-                        Text(if (showAllTracks) "Свернуть" else "Все (${artist.allTracks.size})", fontSize = 14.sp)
+                        Text(
+                            if (showAllTracks) "Свернуть" else "Все (${artist.allTracks.size})",
+                            fontSize = 14.sp
+                        )
                     }
                 }
             }
@@ -777,22 +1205,16 @@ fun ArtistScreen(
         }
 
         items(displayedTracks) { track ->
-            // Автоматически находим обложку альбома для этого трека
             val trackCoverUri = artist.albums.find { it.title == track.album }?.coverUri
             val isPlaying = (currentTrack?.uri == track.uri)
 
             Box(modifier = Modifier.padding(horizontal = 16.dp)) {
-                TrackRowItem(
-                    track = track,
-                    coverUri = trackCoverUri,
-                    isPlaying = isPlaying
-                ) {
+                TrackRowItem(track = track, coverUri = trackCoverUri, isPlaying = isPlaying) {
                     viewModel.playTrack(track, artist.allTracks)
                 }
             }
         }
 
-        // АЛЬБОМЫ
         if (!showAllTracks) {
             item {
                 Spacer(modifier = Modifier.height(24.dp))
@@ -804,14 +1226,29 @@ fun ArtistScreen(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
-
             items(artist.albums) { album ->
+                // Проверяем, играет ли сейчас этот альбом
+                val isThisAlbumContext = currentTrack?.album == album.title
+
                 Box(modifier = Modifier.padding(horizontal = 16.dp)) {
-                    AlbumRowItem(album = album, onClick = { onAlbumClick(album) })
+                    AlbumRowItem(
+                        album = album,
+                        isPlayingContext = isThisAlbumContext && isPlaying, // Передаем статус
+                        onClick = { onAlbumClick(album) },
+                        onPlayClick = {
+                            if (isThisAlbumContext) {
+                                viewModel.togglePlayback() // Если это наш альбом - просто ставим паузу/плей
+                            } else {
+                                val allTracks = (album.regularTracks + album.demoTracks + album.unreleasedTracks).sortedBy { it.albumOrder }
+                                if (allTracks.isNotEmpty()) {
+                                    viewModel.playTrack(allTracks.first(), allTracks)
+                                }
+                            }
+                        }
+                    )
                 }
             }
         }
-
         item { Spacer(modifier = Modifier.height(100.dp)) }
     }
 }
@@ -823,37 +1260,52 @@ fun AlbumScreen(
     onClose: () -> Unit
 ) {
     var showEditDialog by remember { mutableStateOf(false) }
-
-    // Считываем текущую играющую песню
     val currentTrack by viewModel.currentTrack.collectAsState()
+    val isPlaying by viewModel.isPlaying.collectAsState()
+    val isThisAlbumContext = currentTrack?.album == album.title
 
-    val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        uri?.let { viewModel.setAlbumPhoto(album.artist, album.title, it) }
-    }
+    val photoPickerLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+            uri?.let { viewModel.setAlbumPhoto(album.artist, album.title, it) }
+        }
 
     val bitmap = remember(album.coverUri) {
         album.coverUri?.let { path ->
-            try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null }
+            try {
+                android.graphics.BitmapFactory.decodeFile(path)
+            } catch (e: Exception) {
+                null
+            }
         }
     }
 
     if (showEditDialog) {
-        EditAlbumDialog(album = album, viewModel = viewModel, onDismiss = { showEditDialog = false })
+        EditAlbumDialog(
+            album = album,
+            viewModel = viewModel,
+            onDismiss = { showEditDialog = false })
+    }
+
+    // --- НОВОЕ: ЖЕСТКАЯ СОРТИРОВКА ТРЕКОВ ПО СОХРАНЕННОМУ ПОРЯДКУ ---
+    val sortedRegular =
+        remember(album.regularTracks) { album.regularTracks.sortedBy { it.albumOrder } }
+    val sortedDemo = remember(album.demoTracks) { album.demoTracks.sortedBy { it.albumOrder } }
+    val sortedUnreleased =
+        remember(album.unreleasedTracks) { album.unreleasedTracks.sortedBy { it.albumOrder } }
+
+    // Собираем их в один правильный плейлист для плеера
+    val allAlbumTracksSorted = remember(sortedRegular, sortedDemo, sortedUnreleased) {
+        sortedRegular + sortedDemo + sortedUnreleased
     }
 
     LazyColumn(modifier = Modifier.fillMaxSize()) {
-
-        // ==========================================
-        // 1. ШАПКА АЛЬБОМА С СЕРЫМ ФОНОМ
-        // ==========================================
         item {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp))
-                    .background(Color(0xFF242424)) // Тёмно-серый цвет фона для шапки
+                    .background(Color(0xFF242424))
+                    .statusBarsPadding()
                     .padding(16.dp)
             ) {
                 Column(modifier = Modifier.fillMaxWidth()) {
@@ -863,16 +1315,23 @@ fun AlbumScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         IconButton(onClick = onClose) {
-                            Icon(Icons.Default.ArrowBack, contentDescription = "Назад", tint = Color.White)
+                            Icon(
+                                Icons.Default.ArrowBack,
+                                contentDescription = "Назад",
+                                tint = Color.White
+                            )
                         }
                         IconButton(onClick = { showEditDialog = true }) {
-                            Icon(Icons.Default.Edit, contentDescription = "Редактировать альбом", tint = Color.White)
+                            Icon(
+                                Icons.Default.Edit,
+                                contentDescription = "Редактировать альбом",
+                                tint = Color.White
+                            )
                         }
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Обложка альбома
                     Box(
                         modifier = Modifier
                             .size(280.dp)
@@ -891,44 +1350,94 @@ fun AlbumScreen(
                             )
                         } else {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Icon(Icons.Default.Album, contentDescription = null, tint = Color.White, modifier = Modifier.size(56.dp))
-                                Text("Нажмите, чтобы добавить фото", color = Color.LightGray, fontSize = 12.sp)
+                                Icon(
+                                    Icons.Default.Album,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(56.dp)
+                                )
+                                Text(
+                                    "Нажмите, чтобы добавить фото",
+                                    color = Color.LightGray,
+                                    fontSize = 12.sp
+                                )
                             }
                         }
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
-                    Text(text = album.title, fontSize = 26.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                    Text(
-                        text = "${album.artist} • ${album.year ?: "Неизвестный год"}",
-                        fontSize = 16.sp,
-                        color = Color.LightGray
-                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = album.title,
+                                fontSize = 26.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+
+                            val totalTracks = album.regularTracks.size + album.demoTracks.size + album.unreleasedTracks.size
+                            val albumType = if (totalTracks == 1) "Сингл" else "Альбом"
+
+                            Text(
+                                text = "${album.artist} • $albumType • ${album.year ?: "Неизвестный год"}",
+                                fontSize = 16.sp,
+                                color = Color.LightGray
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        // === ВОТ ТА САМАЯ УМНАЯ КНОПКА PLAY/PAUSE ===
+                        IconButton(
+                            onClick = {
+                                if (isThisAlbumContext) {
+                                    viewModel.togglePlayback()
+                                } else if (allAlbumTracksSorted.isNotEmpty()) {
+                                    viewModel.playTrack(allAlbumTracksSorted.first(), allAlbumTracksSorted)
+                                }
+                            },
+                            modifier = Modifier
+                                .size(52.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary)
+                        ) {
+                            Icon(
+                                imageVector = if (isThisAlbumContext && isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = "Играть/Пауза",
+                                tint = Color.White,
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
+                    }
                 }
             }
             Spacer(modifier = Modifier.height(16.dp))
         }
 
         // ==========================================
-        // 2. ОСНОВНЫЕ ТРЕКИ АЛЬБОМА
+        // ОСНОВНЫЕ ТРЕКИ АЛЬБОМА (Теперь отсортированы!)
         // ==========================================
-        items(album.regularTracks) { track ->
-            val isPlaying = (currentTrack?.uri == track.uri)
+        items(sortedRegular) { track ->
+            val isPlayingTrack = (currentTrack?.uri == track.uri)
             Box(modifier = Modifier.padding(horizontal = 16.dp)) {
-                TrackRowItem(
-                    track = track,
-                    coverUri = album.coverUri, // Передаем обложку альбома
-                    isPlaying = isPlaying
-                ) {
-                    viewModel.playTrack(track, album.regularTracks + album.demoTracks + album.unreleasedTracks)
+                TrackRowItem(track = track, coverUri = album.coverUri, isPlaying = isPlayingTrack) {
+                    viewModel.playTrack(
+                        track,
+                        allAlbumTracksSorted
+                    ) // Передаем отсортированную очередь!
                 }
             }
         }
 
         // ==========================================
-        // 3. СЕКЦИЯ DEMO
+        // СЕКЦИЯ DEMO (Теперь отсортирована!)
         // ==========================================
-        if (album.hasDemosEnabled && album.demoTracks.isNotEmpty()) {
+        if (album.hasDemosEnabled && sortedDemo.isNotEmpty()) {
             item {
                 Spacer(modifier = Modifier.height(16.dp))
                 Row(
@@ -936,29 +1445,31 @@ fun AlbumScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     HorizontalDivider(modifier = Modifier.weight(1f), color = Color.LightGray)
-                    Text(text = "Demo", modifier = Modifier.padding(horizontal = 12.dp), color = Color.Gray, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        text = "Demo",
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                        color = Color.Gray,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
                     HorizontalDivider(modifier = Modifier.weight(1f), color = Color.LightGray)
                 }
                 Spacer(modifier = Modifier.height(16.dp))
             }
-            items(album.demoTracks) { track ->
-                val isPlaying = (currentTrack?.uri == track.uri)
+            items(sortedDemo) { track ->
+                val isPlayingTrack = (currentTrack?.uri == track.uri)
                 Box(modifier = Modifier.padding(horizontal = 16.dp)) {
-                    TrackRowItem(
-                        track = track,
-                        coverUri = album.coverUri,
-                        isPlaying = isPlaying
-                    ) {
-                        viewModel.playTrack(track, album.regularTracks + album.demoTracks + album.unreleasedTracks)
+                    TrackRowItem(track = track, coverUri = album.coverUri, isPlaying = isPlayingTrack) {
+                        viewModel.playTrack(track, allAlbumTracksSorted)
                     }
                 }
             }
         }
 
         // ==========================================
-        // 4. СЕКЦИЯ UNRELEASED
+        // СЕКЦИЯ UNRELEASED (Теперь отсортирована!)
         // ==========================================
-        if (album.hasUnreleasedEnabled && album.unreleasedTracks.isNotEmpty()) {
+        if (album.hasUnreleasedEnabled && sortedUnreleased.isNotEmpty()) {
             item {
                 Spacer(modifier = Modifier.height(16.dp))
                 Row(
@@ -966,20 +1477,22 @@ fun AlbumScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     HorizontalDivider(modifier = Modifier.weight(1f), color = Color.LightGray)
-                    Text(text = "Unreleased", modifier = Modifier.padding(horizontal = 12.dp), color = Color.Gray, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        text = "Unreleased",
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                        color = Color.Gray,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
                     HorizontalDivider(modifier = Modifier.weight(1f), color = Color.LightGray)
                 }
                 Spacer(modifier = Modifier.height(16.dp))
             }
-            items(album.unreleasedTracks) { track ->
-                val isPlaying = (currentTrack?.uri == track.uri)
+            items(sortedUnreleased) { track ->
+                val isPlayingTrack = (currentTrack?.uri == track.uri)
                 Box(modifier = Modifier.padding(horizontal = 16.dp)) {
-                    TrackRowItem(
-                        track = track,
-                        coverUri = album.coverUri,
-                        isPlaying = isPlaying
-                    ) {
-                        viewModel.playTrack(track, album.regularTracks + album.demoTracks + album.unreleasedTracks)
+                    TrackRowItem(track = track, coverUri = album.coverUri, isPlaying = isPlayingTrack) {
+                        viewModel.playTrack(track, allAlbumTracksSorted)
                     }
                 }
             }
@@ -998,7 +1511,11 @@ fun TrackRowItem(
 ) {
     val bitmap = remember(coverUri) {
         coverUri?.let { path ->
-            try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null }
+            try {
+                android.graphics.BitmapFactory.decodeFile(path)
+            } catch (e: Exception) {
+                null
+            }
         }
     }
 
@@ -1009,20 +1526,16 @@ fun TrackRowItem(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(
-                if (isPlaying) MaterialTheme.colorScheme.primaryContainer
-                else Color.Transparent
-            )
+            .background(if (isPlaying) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
             .clickable { onClick() }
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // --- ОБЛОЖКА ТРЕКА ИЛИ ЗАГЛУШКА ---
         if (bitmap != null) {
             androidx.compose.foundation.Image(
                 bitmap = bitmap.asImageBitmap(),
                 contentDescription = null,
-                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .size(52.dp)
                     .clip(RoundedCornerShape(8.dp))
@@ -1032,10 +1545,7 @@ fun TrackRowItem(
                 modifier = Modifier
                     .size(52.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(
-                        if (isPlaying) MaterialTheme.colorScheme.primary
-                        else Color.LightGray
-                    ),
+                    .background(if (isPlaying) MaterialTheme.colorScheme.primary else Color.LightGray),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
@@ -1048,10 +1558,8 @@ fun TrackRowItem(
 
         Spacer(modifier = Modifier.width(14.dp))
 
-        // --- НАЗВАНИЕ + ТЕГ + ИСПОЛНИТЕЛЬ ---
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Название трека
                 Text(
                     text = safeTitle,
                     fontSize = 16.sp,
@@ -1059,10 +1567,9 @@ fun TrackRowItem(
                     color = if (isPlaying) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false) // Позволяет названию сужаться, оставляя место для тега
+                    modifier = Modifier.weight(1f, fill = false)
                 )
 
-                // ТЕГИ DEMO ИЛИ UNRELEASED
                 if (track.isDemo || track.isUnreleased) {
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
@@ -1092,7 +1599,7 @@ fun TrackRowItem(
 }
 
 @Composable
-fun AlbumRowItem(album: Album, onClick: () -> Unit) {
+fun AlbumRowItem(album: Album, isPlayingContext: Boolean, onClick: () -> Unit, onPlayClick: () -> Unit) {
     val bitmap = remember(album.coverUri) {
         album.coverUri?.let { path ->
             try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null }
@@ -1117,17 +1624,27 @@ fun AlbumRowItem(album: Album, onClick: () -> Unit) {
             Box(
                 modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)).background(Color.DarkGray),
                 contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Default.Album, contentDescription = null, tint = Color.White)
-            }
+            ) { Icon(Icons.Default.Album, contentDescription = null, tint = Color.White) }
         }
 
         Spacer(modifier = Modifier.width(12.dp))
 
-        Column {
+        Column(modifier = Modifier.weight(1f)) {
             Text(album.title, fontSize = 18.sp, fontWeight = FontWeight.Medium)
             val totalTracks = album.regularTracks.size + album.demoTracks.size + album.unreleasedTracks.size
-            Text("${album.year ?: "Год не указан"} • $totalTracks треков", fontSize = 14.sp, color = Color.Gray)
+            val typeText = if (totalTracks == 1) "Сингл" else "$totalTracks треков"
+            Text("${album.year ?: "Год не указан"} • $typeText", fontSize = 14.sp, color = Color.Gray)
+        }
+
+        IconButton(
+            onClick = onPlayClick,
+            modifier = Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), CircleShape)
+        ) {
+            Icon(
+                imageVector = if (isPlayingContext) Icons.Default.Pause else Icons.Default.PlayArrow,
+                contentDescription = "Играть/Пауза",
+                tint = MaterialTheme.colorScheme.primary
+            )
         }
     }
 }
@@ -1140,12 +1657,17 @@ fun EditAlbumDialog(
 ) {
     var yearText by remember { mutableStateOf(album.year?.toString() ?: "") }
 
-    val allTracks = remember(album) { album.regularTracks + album.demoTracks + album.unreleasedTracks }
+    // Собираем треки и сразу сортируем их в правильном порядке
+    val allTracks = remember(album) {
+        (album.regularTracks + album.demoTracks + album.unreleasedTracks).sortedBy { it.albumOrder }
+    }
 
-    // Карта состояний для каждой песни: URI (String) -> "REGULAR", "DEMO", "UNRELEASED"
+    // Используем изменяемый список, чтобы треки двигались на экране при клике
+    val editableTracks = remember { mutableStateListOf(*allTracks.toTypedArray()) }
+
     val trackTypes = remember {
         mutableStateMapOf<String, String>().apply {
-            allTracks.forEach { track ->
+            editableTracks.forEach { track ->
                 val type = when {
                     track.isDemo -> "DEMO"
                     track.isUnreleased -> "UNRELEASED"
@@ -1166,33 +1688,56 @@ fun EditAlbumDialog(
                         value = yearText,
                         onValueChange = { yearText = it },
                         label = { Text("Год выпуска") },
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 16.dp)
                     )
-                    Text("Типы треков:", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text("Порядок и типы треков:", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                     Spacer(modifier = Modifier.height(8.dp))
                 }
 
-                items(allTracks) { track ->
-                    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                        Text(track.title ?: track.fileName, fontWeight = FontWeight.Medium)
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            FilterChip(
-                                selected = trackTypes[track.uri] == "REGULAR",
-                                onClick = { trackTypes[track.uri] = "REGULAR" },
-                                label = { Text("Обычный", fontSize = 12.sp) }
+                itemsIndexed(editableTracks, key = { _, track -> track.uri }) { index, track ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(track.title ?: track.fileName, fontWeight = FontWeight.Medium, maxLines = 1)
+
+                            // Скроллируемый ряд чипов, чтобы не ломался интерфейс
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                FilterChip(selected = trackTypes[track.uri] == "REGULAR", onClick = { trackTypes[track.uri] = "REGULAR" }, label = { Text("Обычный", fontSize = 11.sp) })
+                                FilterChip(selected = trackTypes[track.uri] == "DEMO", onClick = { trackTypes[track.uri] = "DEMO" }, label = { Text("Demo", fontSize = 11.sp) })
+                                FilterChip(selected = trackTypes[track.uri] == "UNRELEASED", onClick = { trackTypes[track.uri] = "UNRELEASED" }, label = { Text("Unreleased", fontSize = 11.sp) })
+                            }
+                        }
+
+                        // Кнопки перемещения
+                        Column {
+                            Icon(
+                                Icons.Default.KeyboardArrowUp,
+                                contentDescription = "Вверх",
+                                tint = if (index > 0) Color.Gray else Color.LightGray,
+                                modifier = Modifier.clickable(enabled = index > 0) {
+                                    val movedTrack = editableTracks.removeAt(index)
+                                    editableTracks.add(index - 1, movedTrack)
+                                }
                             )
-                            FilterChip(
-                                selected = trackTypes[track.uri] == "DEMO",
-                                onClick = { trackTypes[track.uri] = "DEMO" },
-                                label = { Text("Demo", fontSize = 12.sp) }
-                            )
-                            FilterChip(
-                                selected = trackTypes[track.uri] == "UNRELEASED",
-                                onClick = { trackTypes[track.uri] = "UNRELEASED" },
-                                label = { Text("Unreleased", fontSize = 12.sp) }
+                            Icon(
+                                Icons.Default.KeyboardArrowDown,
+                                contentDescription = "Вниз",
+                                tint = if (index < editableTracks.size - 1) Color.Gray else Color.LightGray,
+                                modifier = Modifier.clickable(enabled = index < editableTracks.size - 1) {
+                                    val movedTrack = editableTracks.removeAt(index)
+                                    editableTracks.add(index + 1, movedTrack)
+                                }
                             )
                         }
                     }
@@ -1204,7 +1749,8 @@ fun EditAlbumDialog(
                 viewModel.updateAlbumDetails(
                     album = album,
                     newYear = yearText.toIntOrNull(),
-                    trackTypesMap = trackTypes
+                    trackTypesMap = trackTypes,
+                    orderedUris = editableTracks.map { it.uri } // Передаем итоговый порядок списка!
                 )
                 onDismiss()
             }) {
@@ -1216,4 +1762,3 @@ fun EditAlbumDialog(
         }
     )
 }
-

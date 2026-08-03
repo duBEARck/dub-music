@@ -47,6 +47,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = getApplication<Application>().getSharedPreferences("artist_photos", android.content.Context.MODE_PRIVATE)
     private var cachedTracks: List<TrackEntity> = emptyList()
 
+    // --- ГЛОБАЛЬНАЯ ПАМЯТЬ ДЛЯ ПЕРЕХОДОВ ИЗ ПЛЕЕРА ---
+    private val _openedArtistName = MutableStateFlow<String?>(null)
+    val openedArtistName: StateFlow<String?> = _openedArtistName.asStateFlow()
+
+    private val _openedAlbumTitle = MutableStateFlow<String?>(null)
+    val openedAlbumTitle: StateFlow<String?> = _openedAlbumTitle.asStateFlow()
+
+    fun openArtist(name: String?) { _openedArtistName.value = name }
+    fun openAlbum(title: String?) { _openedAlbumTitle.value = title }
+
     init {
         // Запускаем сборку библиотеки сразу при создании ViewModel и при любых изменениях в базе
         viewModelScope.launch {
@@ -168,13 +178,47 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun createPlaylist(name: String, imageUri: String?) {
         viewModelScope.launch(Dispatchers.IO) {
-            dao.insertPlaylist(PlaylistEntity(name = name, imageUri = imageUri))
+            val localPath = savePlaylistPhotoLocally(imageUri)
+            dao.insertPlaylist(PlaylistEntity(name = name, imageUri = localPath))
         }
     }
 
     fun updatePlaylist(playlist: PlaylistEntity, newName: String, newImageUri: String?) {
         viewModelScope.launch(Dispatchers.IO) {
-            dao.updatePlaylist(playlist.copy(name = newName, imageUri = newImageUri))
+            // Если ссылка начинается с "content://", значит мы выбрали новое фото из галереи
+            val finalPath = if (newImageUri?.startsWith("content://") == true) {
+                savePlaylistPhotoLocally(newImageUri)
+            } else {
+                newImageUri // Иначе оставляем старый локальный путь (или null)
+            }
+            dao.updatePlaylist(playlist.copy(name = newName, imageUri = finalPath))
+        }
+    }
+
+    // --- НОВАЯ УНИВЕРСАЛЬНАЯ ФУНКЦИЯ СОХРАНЕНИЯ ---
+    private fun savePlaylistPhotoLocally(uriString: String?): String? {
+        if (uriString == null) return null
+        return try {
+            val context = getApplication<Application>()
+            val uri = Uri.parse(uriString)
+
+            // Создаем папку playlist_photos
+            val photosDir = File(context.filesDir, "playlist_photos")
+            if (!photosDir.exists()) photosDir.mkdirs()
+
+            // Генерируем уникальное имя файла по времени
+            val photoFile = File(photosDir, "playlist_${System.currentTimeMillis()}.jpg")
+
+            // Копируем байты из галереи в наше приложение
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(photoFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            photoFile.absolutePath // Возвращаем путь к нашему локальному файлу
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
         }
     }
 
@@ -238,6 +282,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     // --- ЛОГИКА ПЛЕЕРА ---
     private var currentQueue: List<TrackEntity> = emptyList()
     private var currentQueueIndex: Int = -1
+    private val _currentQueueFlow = MutableStateFlow<List<TrackEntity>>(emptyList())
+    private val _currentQueueTitle = MutableStateFlow("Очередь")
+    val currentQueueTitle: StateFlow<String> = _currentQueueTitle.asStateFlow()
+    val currentQueueFlow: StateFlow<List<TrackEntity>> = _currentQueueFlow.asStateFlow()
     var musicService: MusicService? = null
     private var progressJob: Job? = null // Для фонового таймера прогресса
 
@@ -248,7 +296,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
     //режимы воспроизведения (случайный порядок и прочие)
-    private val _playbackMode = MutableStateFlow(PlaybackMode.NORMAL)
+    private val _playbackMode = MutableStateFlow(PlaybackMode.REPEAT_ALL)
     val playbackMode: StateFlow<PlaybackMode> = _playbackMode.asStateFlow()
 
     fun togglePlaybackMode(mode: PlaybackMode) {
@@ -279,18 +327,35 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _progress = MutableStateFlow(0f)
     val progress: StateFlow<Float> = _progress.asStateFlow()
 
-    fun playTrack(track: TrackEntity, playlist: List<TrackEntity>? = null) {
+    // Добавили параметр forcedTitle
+    fun playTrack(track: TrackEntity, playlist: List<TrackEntity>? = null, forcedTitle: String? = null) {
         if (playlist != null) {
             currentQueue = playlist
+            _currentQueueFlow.value = playlist
             currentQueueIndex = currentQueue.indexOf(track)
+
+            if (forcedTitle != null) {
+                // Если передали конкретное название (например, из кастомного плейлиста)
+                _currentQueueTitle.value = forcedTitle
+            } else {
+                // Умное авто-определение!
+                val isSameAlbum = playlist.isNotEmpty() && playlist.all { it.album == playlist.first().album }
+                val isSameArtist = playlist.isNotEmpty() && playlist.all { it.artist == playlist.first().artist }
+
+                _currentQueueTitle.value = when {
+                    isSameAlbum && !playlist.first().album.isNullOrBlank() -> playlist.first().album!!
+                    isSameArtist && !playlist.first().artist.isNullOrBlank() -> "Треки: ${playlist.first().artist}"
+                    playlist.size == cachedTracks.size -> "Все скачанные треки"
+                    else -> "Моя музыка"
+                }
+            }
         } else {
             currentQueueIndex = currentQueue.indexOf(track)
         }
 
         progressJob?.cancel()
 
-        // 1. Сначала подготавливаем плеер и запускаем музыку в сервисе
-        musicService?.currentTrackItem = track // <--- Сохраняем объект в бессмертный Сервис!
+        musicService?.currentTrackItem = track
         musicService?.playTrack(track.uri)
 
         musicService?.onTrackCompletion = {
@@ -310,14 +375,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
         startProgressUpdate()
 
-        // 2. СРАЗУ собираем красивое уведомление со всеми метаданными
         musicService?.updateNotification(
             title = track.title ?: track.fileName,
             artist = track.artist ?: "Неизвестный исполнитель",
             isPlaying = true
         )
 
-        // 3. И только теперь официально привязываем сервис к шторке
         val intent = android.content.Intent(getApplication(), MusicService::class.java)
         getApplication<android.app.Application>().startForegroundService(intent)
     }
@@ -451,12 +514,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun playPlaylistDirectly(playlistId: Int) {
         viewModelScope.launch {
-            // Берем актуальный список треков из базы (единоразово)
             val tracks = getTracksForPlaylist(playlistId).first()
+            // Получаем реальное имя плейлиста из базы
+            val pName = allPlaylists.first().find { it.playlistId == playlistId }?.name ?: "Плейлист"
 
             if (tracks.isNotEmpty()) {
                 withContext(Dispatchers.Main) {
-                    playTrack(tracks.first(), tracks) // Запускаем первую песню и передаем очередь
+                    playTrack(tracks.first(), tracks, forcedTitle = pName) // Передаем имя!
                 }
             }
         }
@@ -491,6 +555,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
             val albumList = groupedByAlbum.map { (albumTitle, albumTracks) ->
                 val releaseYear = albumTracks.firstNotNullOfOrNull { it.year }
+
+                // --- СОРТИРУЕМ ВСЕ ТРЕКИ ПО СОХРАНЕННОМУ ПОРЯДКУ ---
+                val sortedTracks = albumTracks.sortedBy { it.albumOrder }
 
                 // Фильтруем треки по типам
                 val regular = albumTracks.filter { !it.isDemo && !it.isUnreleased }
@@ -558,17 +625,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun updateAlbumDetails(
         album: Album,
         newYear: Int?,
-        trackTypesMap: Map<String, String> // URI трека (String) -> "REGULAR", "DEMO", "UNRELEASED"
+        trackTypesMap: Map<String, String>,
+        orderedUris: List<String> // <--- НОВЫЙ ПАРАМЕТР ПОРЯДКА
     ) {
         viewModelScope.launch(Dispatchers.IO) {
             val allAlbumTracks = album.regularTracks + album.demoTracks + album.unreleasedTracks
 
             allAlbumTracks.forEach { track ->
                 val type = trackTypesMap[track.uri] ?: "REGULAR"
+                val orderIndex = orderedUris.indexOf(track.uri) // Узнаем новую позицию трека
+
                 val updatedTrack = track.copy(
                     year = newYear,
                     isDemo = (type == "DEMO"),
-                    isUnreleased = (type == "UNRELEASED")
+                    isUnreleased = (type == "UNRELEASED"),
+                    albumOrder = if (orderIndex != -1) orderIndex else track.albumOrder
                 )
                 dao.updateTrack(updatedTrack)
             }

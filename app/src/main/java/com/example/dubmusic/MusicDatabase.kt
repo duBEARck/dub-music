@@ -15,7 +15,8 @@ data class TrackEntity(
     val isHidden: Boolean = false,
     val durationMs: Long = 0L, // Для подсчета времени!
     val isDemo: Boolean = false, // <--- флаг для демо-версий треков из альбома
-    val isUnreleased: Boolean = false // <--- флаг невыпущенного трека
+    val isUnreleased: Boolean = false, // <--- флаг невыпущенного трека
+    val albumOrder: Int = 0 // <--- НОВОЕ ПОЛЕ ДЛЯ ПОРЯДКА В АЛЬБОМЕ
 )
 
 // 1. Таблица Плейлистов
