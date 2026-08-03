@@ -21,6 +21,9 @@ import kotlinx.coroutines.flow.first
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
+import kotlinx.coroutines.withContext
 
 enum class PlaybackMode {
     NORMAL, SHUFFLE, REPEAT_ALL, REPEAT_ONE
@@ -40,10 +43,29 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     val unprocessedTracks = dao.getUnprocessedTracks()
     val processedTracks = dao.getAllProcessedTracks()
 
+    // Постоянное хранилище настроек Android (не стирается при закрытии приложения) для фото исполнителя
+    private val prefs = getApplication<Application>().getSharedPreferences("artist_photos", android.content.Context.MODE_PRIVATE)
+    private var cachedTracks: List<TrackEntity> = emptyList()
+
+    init {
+        // Запускаем сборку библиотеки сразу при создании ViewModel и при любых изменениях в базе
+        viewModelScope.launch {
+            processedTracks.collect { tracks ->
+                cachedTracks = tracks
+                buildLibrary(tracks)
+            }
+        }
+    }
+
     // Функция добавления файлов из проводника
     fun addUnprocessedFile(uriString: String, fileName: String) {
         viewModelScope.launch(Dispatchers.IO) {
             var duration = 0L
+            var extractedTitle: String? = null
+            var extractedArtist: String? = null
+            var extractedAlbum: String? = null
+            var extractedYear: Int? = null
+
             try {
                 // Запускаем системный сканер файла
                 val retriever = MediaMetadataRetriever()
@@ -53,22 +75,72 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 val timeString = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                 duration = timeString?.toLong() ?: 0L
 
+                // --- НОВОЕ: Сразу вытаскиваем все метаданные ---
+                extractedTitle = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
+                extractedArtist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
+                extractedAlbum = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)
+                val yearString = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_YEAR)
+                extractedYear = yearString?.toIntOrNull() // Превращаем текст в число
+
                 retriever.release()
             } catch (e: Exception) {
                 e.printStackTrace() // Если файл битый, длина останется 0
             }
 
-            // Сохраняем в базу ВМЕСТЕ С ДЛИНОЙ
-            dao.insertTrack(TrackEntity(uri = uriString, fileName = fileName, durationMs = duration))
+            // Сохраняем в базу ВСЁ ВМЕСТЕ
+            dao.insertTrack(
+                TrackEntity(
+                    uri = uriString,
+                    fileName = fileName,
+                    durationMs = duration,
+                    title = extractedTitle,
+                    artist = extractedArtist,
+                    album = extractedAlbum,
+                    year = extractedYear,
+                    isDemo = false
+                )
+            )
+        }
+    }
+    fun setArtistPhoto(artistName: String, uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val context = getApplication<Application>()
+
+                // Создаем папку artist_photos во внутренней памяти приложения
+                val photosDir = File(context.filesDir, "artist_photos")
+                if (!photosDir.exists()) photosDir.mkdirs()
+
+                // Создаем файл для фото этого исполнителя
+                val photoFile = File(photosDir, "${artistName.hashCode()}.jpg")
+
+                // Копируем байты из галереи прямо в наш файл
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(photoFile).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+
+                // Запоминаем абсолютный путь к локальному файлу в настройки
+                prefs.edit().putString(artistName, photoFile.absolutePath).apply()
+
+                // Обновляем библиотеку в главном потоке
+                withContext(Dispatchers.Main) {
+                    buildLibrary(cachedTracks)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 
-    fun processTrack(track: TrackEntity, title: String, artist: String, album: String) {
+    fun processTrack(track: TrackEntity, title: String, artist: String, album: String, year: Int? = null) {
         viewModelScope.launch(Dispatchers.IO) {
             val updatedTrack = track.copy(
                 title = title,
                 artist = artist.ifBlank { "Неизвестный исполнитель" },
                 album = album.ifBlank { null },
+                year = year ?: track.year, // Обновляем год
                 isProcessed = true
             )
             dao.updateTrack(updatedTrack)
@@ -403,5 +475,110 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         if (_isPlaying.value) {
             startProgressUpdate()
         }
+    }
+
+    private val _artistsList = MutableStateFlow<List<Artist>>(emptyList())
+    val artistsList = _artistsList.asStateFlow()
+
+    private fun buildLibrary(tracks: List<TrackEntity>) {
+        // 1. Группируем общую кучу треков по именам артистов
+        val groupedByArtist = tracks.groupBy { it.artist ?: "Неизвестный исполнитель" }
+
+        val newArtistsList = groupedByArtist.map { (artistName, artistTracks) ->
+
+            // 2. Внутри каждого артиста группируем его треки по альбомам
+            val groupedByAlbum = artistTracks.groupBy { it.album ?: "Неизвестный альбом" }
+
+            val albumList = groupedByAlbum.map { (albumTitle, albumTracks) ->
+                val releaseYear = albumTracks.firstNotNullOfOrNull { it.year }
+
+                // Фильтруем треки по типам
+                val regular = albumTracks.filter { !it.isDemo && !it.isUnreleased }
+                val demos = albumTracks.filter { it.isDemo }
+                val unreleased = albumTracks.filter { it.isUnreleased }
+
+                // Ключ для хранения обложки альбома в prefs
+                val albumPhotoKey = "album_photo_${artistName}_${albumTitle}"
+
+                Album(
+                    title = albumTitle,
+                    artist = artistName,
+                    year = releaseYear,
+                    coverUri = prefs.getString(albumPhotoKey, null), // Читаем сохраненный путь к обложке
+                    regularTracks = regular,
+                    demoTracks = demos,
+                    unreleasedTracks = unreleased,
+                    hasDemosEnabled = demos.isNotEmpty(),
+                    hasUnreleasedEnabled = unreleased.isNotEmpty()
+                )
+            }.sortedBy { it.year ?: 0 } // <-- Сортируем альбомы по хронологии!
+
+            Artist(
+                name = artistName,
+                photoUri = prefs.getString(artistName, null), // <--- Читаем из памяти устройства!
+                albums = albumList,
+                topTracks = artistTracks.take(5),
+                allTracks = artistTracks
+            )
+        }.sortedBy { it.name } // Сортируем самих артистов по алфавиту для вкладки Статистика
+
+        // Отдаем готовый список интерфейсу
+        _artistsList.value = newArtistsList
+    }
+
+    // Сохранение обложки альбома вечно в память устройства
+    fun setAlbumPhoto(artistName: String, albumTitle: String, uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val context = getApplication<Application>()
+                val photosDir = File(context.filesDir, "album_photos")
+                if (!photosDir.exists()) photosDir.mkdirs()
+
+                val photoFile = File(photosDir, "${artistName.hashCode()}_${albumTitle.hashCode()}.jpg")
+
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(photoFile).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+
+                val albumPhotoKey = "album_photo_${artistName}_${albumTitle}"
+                prefs.edit().putString(albumPhotoKey, photoFile.absolutePath).apply()
+
+                withContext(Dispatchers.Main) {
+                    buildLibrary(cachedTracks)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    // Сохранение изменений альбома (Год + Статусы треков)
+    fun updateAlbumDetails(
+        album: Album,
+        newYear: Int?,
+        trackTypesMap: Map<String, String> // URI трека (String) -> "REGULAR", "DEMO", "UNRELEASED"
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val allAlbumTracks = album.regularTracks + album.demoTracks + album.unreleasedTracks
+
+            allAlbumTracks.forEach { track ->
+                val type = trackTypesMap[track.uri] ?: "REGULAR"
+                val updatedTrack = track.copy(
+                    year = newYear,
+                    isDemo = (type == "DEMO"),
+                    isUnreleased = (type == "UNRELEASED")
+                )
+                dao.updateTrack(updatedTrack)
+            }
+        }
+    }
+
+    // Получить путь к обложке альбома по имени артиста и названию альбома
+    fun getAlbumCoverPath(artistName: String?, albumTitle: String?): String? {
+        if (artistName.isNullOrBlank() || albumTitle.isNullOrBlank()) return null
+        val albumPhotoKey = "album_photo_${artistName}_${albumTitle}"
+        return prefs.getString(albumPhotoKey, null)
     }
 }

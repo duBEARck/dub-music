@@ -1,9 +1,12 @@
-package com.example.dubmusic // Убедись, что тут твой правильный пакет!
+package com.example.dubmusic
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Binder
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -78,14 +81,14 @@ class MusicService : Service() {
         val manager = getSystemService(NotificationManager::class.java)
         manager?.createNotificationChannel(channel)
 
-        // --- НОВОЕ: Создаем официальный паспорт плеера и подключаем к нему наушники ---
+        // Создаем официальный паспорт плеера и подключаем к нему наушники
         mediaSession = MediaSessionCompat(this, "DubMusicService").apply {
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() { onPlayPauseClick?.invoke() }
                 override fun onPause() { onPlayPauseClick?.invoke() }
                 override fun onSkipToNext() { onNextClick?.invoke() }
                 override fun onSkipToPrevious() { onPrevClick?.invoke() }
-                // --- НОВОЕ: Слушаем перемотку из шторки ---
+                // Слушаем перемотку из шторки
                 override fun onSeekTo(pos: Long) {
                     mediaPlayer?.seekTo(pos.toInt())
                 }
@@ -107,17 +110,40 @@ class MusicService : Service() {
     // Эта функция будет менять песню и кнопки в шторке
     fun updateNotification(title: String, artist: String, isPlaying: Boolean) {
 
+        // --- НОВОЕ: Пытаемся загрузить обложку альбома с диска ---
+        val track = currentTrackItem
+        var albumBitmap: Bitmap? = null
+
+        if (track != null && !track.artist.isNullOrBlank() && !track.album.isNullOrBlank()) {
+            val albumPhotoKey = "album_photo_${track.artist}_${track.album}"
+            val prefs = getSharedPreferences("artist_photos", Context.MODE_PRIVATE)
+            val coverPath = prefs.getString(albumPhotoKey, null)
+
+            if (coverPath != null) {
+                try {
+                    albumBitmap = BitmapFactory.decodeFile(coverPath)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+
         // Получаем текущие данные прямо из плеера
         val duration = mediaPlayer?.duration?.toLong() ?: 0L
         val position = mediaPlayer?.currentPosition?.toLong() ?: 0L
 
-        // 1. МЕТАДАННЫЕ (Добавили передачу длины трека - METADATA_KEY_DURATION)
-        val metadata = MediaMetadataCompat.Builder()
+        // 1. МЕТАДАННЫЕ
+        val metadataBuilder = MediaMetadataCompat.Builder()
             .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
             .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
-            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, duration) // <--- Для ползунка
-            .build()
-        mediaSession.setMetadata(metadata)
+            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, duration)
+
+        // Если обложка нашлась, добавляем её в метаданные плеера (например, для экрана блокировки)
+        if (albumBitmap != null) {
+            metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, albumBitmap)
+        }
+
+        mediaSession.setMetadata(metadataBuilder.build())
 
         // 2. СТАТУС ПЛЕЕРА (Говорим Android, что конкретно сейчас происходит)
         val state = if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
@@ -127,21 +153,21 @@ class MusicService : Service() {
                         PlaybackStateCompat.ACTION_PAUSE or
                         PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
                         PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                        PlaybackStateCompat.ACTION_SEEK_TO // <--- Разрешаем системе дергать ползунок
+                        PlaybackStateCompat.ACTION_SEEK_TO // Разрешаем системе дергать ползунок
             )
             // Передаем статус, текущую секунду и скорость (1.0f - нормальная скорость)
             .setState(state, position, if (isPlaying) 1.0f else 0f)
             .build()
         mediaSession.setPlaybackState(playbackState)
 
-        // 3. СБОРКА УВЕДОМЛЕНИЯ (твой старый код)
+        // 3. СБОРКА УВЕДОМЛЕНИЯ
         val playPauseIcon = if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play
 
         val prevIntent = PendingIntent.getService(this, 1, Intent(this, MusicService::class.java).apply { action = "ACTION_PREV" }, PendingIntent.FLAG_IMMUTABLE)
         val playPauseIntent = PendingIntent.getService(this, 2, Intent(this, MusicService::class.java).apply { action = "ACTION_PLAY_PAUSE" }, PendingIntent.FLAG_IMMUTABLE)
         val nextIntent = PendingIntent.getService(this, 3, Intent(this, MusicService::class.java).apply { action = "ACTION_NEXT" }, PendingIntent.FLAG_IMMUTABLE)
 
-        val notification = NotificationCompat.Builder(this, "MUSIC_CHANNEL")
+        val notificationBuilder = NotificationCompat.Builder(this, "MUSIC_CHANNEL")
             .setContentTitle(title)
             .setContentText(artist)
             .setSmallIcon(R.drawable.ic_play)
@@ -155,9 +181,13 @@ class MusicService : Service() {
             )
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .build()
 
-        startForeground(1, notification)
+        // --- НОВОЕ: Если есть обложка, ставим её большой картинкой в уведомление ---
+        if (albumBitmap != null) {
+            notificationBuilder.setLargeIcon(albumBitmap)
+        }
+
+        startForeground(1, notificationBuilder.build())
     }
 
     override fun onBind(intent: Intent?): IBinder {

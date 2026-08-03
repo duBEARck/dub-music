@@ -25,36 +25,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import coil.compose.rememberAsyncImagePainter
-import androidx.compose.foundation.lazy.items
-import androidx.compose.ui.platform.LocalContext
 import android.content.Intent
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.activity.compose.BackHandler
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.Restore
-import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.ui.graphics.asImageBitmap
 
 @Composable
 fun SavedTabScreen(viewModel: MusicViewModel) {
-    // Читаем данные из базы. collectAsState превращает базу в поток, который сам обновляет экран!
-    val tracks by viewModel.unprocessedTracks.collectAsState(initial = emptyList())
+    // --- ИСПРАВЛЕНИЕ 1: initial = null вместо emptyList() ---
+    val tracksState = viewModel.unprocessedTracks.collectAsState(initial = null)
+    val tracks = tracksState.value
+
     var trackToEdit by remember { mutableStateOf<TrackEntity?>(null) }
 
     // Получаем доступ к системным службам
@@ -65,17 +51,26 @@ fun SavedTabScreen(viewModel: MusicViewModel) {
     ) { uris: List<Uri> ->
         uris.forEach { uri ->
             // ВОТ ОНО! Берем права на чтение файла "навечно"
-            context.contentResolver.takePersistableUriPermission(
-                uri,
-                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-            )
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
 
             val fileName = uri.lastPathSegment ?: "Unknown_Audio"
             viewModel.addUnprocessedFile(uri.toString(), fileName)
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+    ) {
+        // Шапка и кнопка добавления всегда остаются на месте!
         Row(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -89,24 +84,31 @@ fun SavedTabScreen(viewModel: MusicViewModel) {
             }
         }
 
-        if (tracks.isEmpty()) {
+        // --- ИСПРАВЛЕНИЕ 2: Тройная проверка, чтобы убрать мигание ---
+        if (tracks == null) {
+            // 1. Данные еще грузятся из БД — показываем просто пустой фон под шапкой
+            Box(modifier = Modifier.fillMaxSize())
+        } else if (tracks.isEmpty()) {
+            // 2. Данные загрузились, и список реально пуст
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("Все файлы обработаны.\nЗагрузите новые.", color = Color.Gray)
             }
-        }
-
-        LazyColumn(contentPadding = PaddingValues(bottom = 80.dp)) {
-            items(tracks, key = { it.uri }) { track ->
-                UnprocessedTrackItem(
-                    track = track,
-                    onEdit = { trackToEdit = track },
-                    onHide = { viewModel.hideTrack(track) },
-                    onPlay = { viewModel.playTrack(track) } // Передаем команду воспроизведения
-                )
+        } else {
+            // 3. Данные есть, выводим список
+            LazyColumn(contentPadding = PaddingValues(bottom = 80.dp)) {
+                items(tracks, key = { it.uri }) { track ->
+                    UnprocessedTrackItem(
+                        track = track,
+                        onEdit = { trackToEdit = track },
+                        onHide = { viewModel.hideTrack(track) },
+                        onPlay = { viewModel.playTrack(track) }
+                    )
+                }
             }
         }
     }
 
+    // Диалог редактирования никуда не делся
     trackToEdit?.let { track ->
         EditTrackDialog(
             track = track,
@@ -120,7 +122,6 @@ fun SavedTabScreen(viewModel: MusicViewModel) {
     }
 }
 
-// Диалог редактирования почти не изменился, только TrackEntity вместо UnprocessedTrack
 @Composable
 fun EditTrackDialog(
     track: TrackEntity,
@@ -128,8 +129,8 @@ fun EditTrackDialog(
     onSave: (title: String, artist: String, album: String) -> Unit
 ) {
     var titleText by remember { mutableStateOf(track.fileName) }
-    var artistText by remember { mutableStateOf("") }
-    var albumText by remember { mutableStateOf("") }
+    var artistText by remember { mutableStateOf(track.artist ?: "") }
+    var albumText by remember { mutableStateOf(track.album ?: "") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -139,7 +140,6 @@ fun EditTrackDialog(
                 Text("Файл: ${track.fileName}", fontSize = 12.sp, color = Color.Gray)
                 OutlinedTextField(value = titleText, onValueChange = { titleText = it }, label = { Text("Название трека") }, singleLine = true)
                 OutlinedTextField(value = artistText, onValueChange = { artistText = it }, label = { Text("Исполнитель") }, singleLine = true)
-                // Подсказка, что если оставить пустым, будет сингл
                 OutlinedTextField(value = albumText, onValueChange = { albumText = it }, label = { Text("Альбом (пусто = Сингл)") }, singleLine = true)
             }
         },
@@ -157,7 +157,7 @@ fun UnprocessedTrackItem(
     track: TrackEntity,
     onEdit: () -> Unit,
     onHide: () -> Unit,
-    onPlay: () -> Unit // Добавили новый параметр
+    onPlay: () -> Unit
 ) {
     var isMenuExpanded by remember { mutableStateOf(false) }
     var showHideDialog by remember { mutableStateOf(false) }
@@ -165,7 +165,7 @@ fun UnprocessedTrackItem(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onPlay() } // ВОТ ТУТ делаем всю строчку кликабельной
+            .clickable { onPlay() }
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -193,7 +193,7 @@ fun UnprocessedTrackItem(
 }
 
 // ---------------------------------------------------------
-// НОВЫЙ ЭКРАН ПЛЕЙЛИСТОВ
+// ЭКРАН ПЛЕЙЛИСТОВ
 // ---------------------------------------------------------
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -201,6 +201,8 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
     val processedTracks by viewModel.processedTracks.collectAsState(initial = emptyList<TrackEntity>())
     val hiddenTracks by viewModel.hiddenTracks.collectAsState(initial = emptyList<TrackEntity>())
     val customPlaylists by viewModel.allPlaylists.collectAsState(initial = emptyList<PlaylistEntity>())
+
+    val currentTrack by viewModel.currentTrack.collectAsState()
 
     var showAllTracks by remember { mutableStateOf(false) }
     var showHiddenTracks by remember { mutableStateOf(false) }
@@ -211,25 +213,17 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
     // 1. ЭКРАН: КАСТОМНЫЙ ПЛЕЙЛИСТ
     // ------------------------------------
     if (openedPlaylist != null) {
-        // --- ПЕРЕХВАТЫВАЕМ СИСТЕМНЫЙ СВАЙП "НАЗАД" ---
-        BackHandler(enabled = true) {
-            openedPlaylist = null // Закрываем плейлист при свайпе
-        }
+        BackHandler(enabled = true) { openedPlaylist = null }
 
         val playlistTracks by viewModel.getTracksForPlaylist(openedPlaylist!!.playlistId).collectAsState(initial = emptyList<TrackEntity>())
         val totalDuration = viewModel.formatTotalDuration(playlistTracks)
         var showEditDialog by remember { mutableStateOf(false) }
-        val currentTrack by viewModel.currentTrack.collectAsState()
         var isReorderMode by remember { mutableStateOf(false) }
 
         Box(modifier = Modifier.fillMaxSize()) {
-
             LazyColumn(modifier = Modifier.fillMaxSize()) {
-
-                // ЭЛЕМЕНТ 1: Шапка (кнопки, обложка, название) — теперь она уедет вверх при скролле!
                 item {
                     Column(modifier = Modifier.fillMaxWidth()) {
-                        // Верхняя панель с кнопками
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
@@ -239,9 +233,7 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
                                 modifier = Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), CircleShape)
                             ) { Icon(Icons.Default.ArrowBack, contentDescription = "Назад") }
 
-                            // Сгруппировали правые кнопки вместе
                             Row {
-                                // Кнопка переключения режима сортировки
                                 IconButton(
                                     onClick = { isReorderMode = !isReorderMode },
                                     modifier = Modifier.background(if (isReorderMode) MaterialTheme.colorScheme.primary.copy(alpha = 0.3f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), CircleShape)
@@ -256,7 +248,6 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
                             }
                         }
 
-                        // Квадратная обложка плейлиста
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -278,7 +269,6 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
                             }
                         }
 
-                        // Инфо-панель (Название, время и большая кнопка Play)
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -299,43 +289,78 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
                     }
                 }
 
-                // ЭЛЕМЕНТЫ 2: Сам список песен
                 itemsIndexed(playlistTracks, key = { _, track -> track.uri }) { index, track ->
-                    // Проверяем, играет ли этот трек прямо сейчас
                     val isPlayingThis = currentTrack?.uri == track.uri
+                    val coverPath = viewModel.getAlbumCoverPath(track.artist, track.album)
+                    val bitmap = remember(coverPath) {
+                        coverPath?.let { path ->
+                            try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null }
+                        }
+                    }
 
                     Column {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                // ПОДСВЕТКА СЕРО-СИНИМ, ЕСЛИ ТРЕК ИГРАЕТ
-                                .background(if (isPlayingThis) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else Color.Transparent)
+                                .background(if (isPlayingThis) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
                                 .clickable { viewModel.playTrack(track, playlistTracks) }
                                 .padding(horizontal = 16.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Заглушка обложки трека
-                            Box(
-                                modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
-                                contentAlignment = Alignment.Center
-                            ) { Icon(Icons.Default.MusicNote, contentDescription = null, tint = MaterialTheme.colorScheme.primary) }
+                            if (bitmap != null) {
+                                Image(
+                                    bitmap = bitmap.asImageBitmap(),
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(if (isPlayingThis) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
+                                    contentAlignment = Alignment.Center
+                                ) { Icon(Icons.Default.MusicNote, contentDescription = null, tint = if (isPlayingThis) Color.White else MaterialTheme.colorScheme.primary) }
+                            }
 
                             Spacer(modifier = Modifier.width(16.dp))
 
-                            // Название и исполнитель
+                            // --- НАЗВАНИЕ И ТЕГ ДЛЯ ПЛЕЙЛИСТОВ ---
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(track.title ?: track.fileName, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                                Text(track.artist ?: "Неизвестный исполнитель", fontSize = 14.sp, color = Color.Gray)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = track.title ?: track.fileName,
+                                        fontSize = 16.sp,
+                                        fontWeight = if (isPlayingThis) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if (track.isDemo || track.isUnreleased) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = if (track.isDemo) "Demo" else "Unreleased",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.Gray,
+                                            modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(Color.Gray.copy(alpha = 0.2f)).padding(horizontal = 4.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = track.artist ?: "Неизвестный исполнитель",
+                                    fontSize = 14.sp,
+                                    color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else Color.Gray,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                )
                             }
 
-                            // ВРЕМЯ ТРЕКА
                             Text(
                                 text = viewModel.formatTrackDuration(track.durationMs),
                                 fontSize = 14.sp,
-                                color = Color.Gray
+                                color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer else Color.Gray
                             )
 
-                            // СТРЕЛОЧКИ СОРТИРОВКИ (Показываем только если включен режим isReorderMode)
                             if (isReorderMode) {
                                 Spacer(modifier = Modifier.width(16.dp))
                                 Column {
@@ -378,34 +403,91 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
                 }
             )
         }
-
     }
     // ------------------------------------
     // 2. ЭКРАН: ВСЕ СКАЧАННЫЕ ТРЕКИ
     // ------------------------------------
     else if (showAllTracks) {
+        BackHandler(enabled = true) { showAllTracks = false }
 
-        BackHandler(enabled = true) {
-            showAllTracks = false // Закрываем плейлист при свайпе
-        }
-
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(16.dp)) {
                 IconButton(onClick = { showAllTracks = false }) { Icon(Icons.Default.ArrowBack, contentDescription = "Назад") }
                 Text("Все скачанные треки", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(processedTracks, key = { it.uri }) { track ->
+                    val isPlayingThis = currentTrack?.uri == track.uri
+                    val coverPath = viewModel.getAlbumCoverPath(track.artist, track.album)
+                    val bitmap = remember(coverPath) {
+                        coverPath?.let { path ->
+                            try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null }
+                        }
+                    }
+
                     Column {
-                        Row(modifier = Modifier.fillMaxWidth().clickable { viewModel.playTrack(track, processedTracks) }.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Audiotrack, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(if (isPlayingThis) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                                .clickable { viewModel.playTrack(track, processedTracks) }
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (bitmap != null) {
+                                Image(
+                                    bitmap = bitmap.asImageBitmap(),
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(if (isPlayingThis) MaterialTheme.colorScheme.primary else Color.Transparent),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(Icons.Default.Audiotrack, contentDescription = null, tint = if (isPlayingThis) Color.White else MaterialTheme.colorScheme.primary)
+                                }
+                            }
+
                             Spacer(modifier = Modifier.width(16.dp))
-                            Column {
-                                Text(track.title ?: track.fileName, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                                Text(track.artist ?: "Неизвестный исполнитель", fontSize = 14.sp, color = Color.Gray)
+
+                            // --- НАЗВАНИЕ И ТЕГ ДЛЯ "ВСЕ ТРЕКИ" ---
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = track.title ?: track.fileName,
+                                        fontSize = 16.sp,
+                                        fontWeight = if (isPlayingThis) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if (track.isDemo || track.isUnreleased) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = if (track.isDemo) "Demo" else "Unreleased",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.Gray,
+                                            modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(Color.Gray.copy(alpha = 0.2f)).padding(horizontal = 4.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = track.artist ?: "Неизвестный исполнитель",
+                                    fontSize = 14.sp,
+                                    color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else Color.Gray,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                )
                             }
                         }
-                        // Разделитель (начинается с отступом, чтобы не перечеркивать иконку ноты)
                         HorizontalDivider(modifier = Modifier.padding(start = 56.dp, end = 16.dp), thickness = 1.dp, color = Color.LightGray.copy(alpha = 0.5f))
                     }
                 }
@@ -416,12 +498,13 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
     // 3. ЭКРАН: СКРЫТЫЕ ТРЕКИ
     // ------------------------------------
     else if (showHiddenTracks) {
+        BackHandler(enabled = true) { showHiddenTracks = false }
 
-        BackHandler(enabled = true) {
-            showHiddenTracks = false // Закрываем плейлист при свайпе
-        }
-
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(16.dp)) {
                 IconButton(onClick = { showHiddenTracks = false }) { Icon(Icons.Default.ArrowBack, contentDescription = "Назад") }
                 Text("Скрытые файлы", fontSize = 24.sp, fontWeight = FontWeight.Bold)
@@ -451,7 +534,11 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
     // 4. ГЛАВНЫЙ ЭКРАН ВКЛАДКИ
     // ------------------------------------
     else {
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+        ) {
             Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text(text = "Плейлисты", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 IconButton(onClick = { showCreateDialog = true }) { Icon(Icons.Default.Add, contentDescription = "Создать плейлист") }
@@ -463,7 +550,6 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
 
             LazyColumn(modifier = Modifier.weight(1f)) {
                 items(customPlaylists) { playlist ->
-                    //Оборачиваем строку в Column, чтобы добавить разделитель снизу
                     Column {
                         Row(modifier = Modifier.fillMaxWidth().clickable { openedPlaylist = playlist }.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                             if (playlist.imageUri != null) {
@@ -476,10 +562,8 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
 
                             Spacer(modifier = Modifier.width(16.dp))
 
-                            //обавляем weight(1f), чтобы текст занял всё свободное место и оттолкнул кнопку вправо
                             Text(playlist.name, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
 
-                            //Кнопка Play прямо в списке
                             IconButton(
                                 onClick = { viewModel.playPlaylistDirectly(playlist.playlistId) },
                                 modifier = Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), CircleShape)
@@ -487,8 +571,6 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
                                 Icon(Icons.Default.PlayArrow, contentDescription = "Играть плейлист", tint = MaterialTheme.colorScheme.primary)
                             }
                         }
-
-                        //Разделитель между плейлистами
                         HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), thickness = 1.dp, color = Color.LightGray.copy(alpha = 0.5f))
                     }
                 }
@@ -534,7 +616,7 @@ fun CreatePlaylistDialog(
 ) {
     var name by remember { mutableStateOf(initialName) }
     var imageUri by remember { mutableStateOf(initialImageUri) }
-    var showDeleteConfirm by remember { mutableStateOf(false) } // Состояние для окна "Вы точно хотите?"
+    var showDeleteConfirm by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
@@ -544,7 +626,6 @@ fun CreatePlaylistDialog(
         }
     }
 
-    // ОКНО ПОДТВЕРЖДЕНИЯ УДАЛЕНИЯ
     if (showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
@@ -562,7 +643,6 @@ fun CreatePlaylistDialog(
             dismissButton = { TextButton(onClick = { showDeleteConfirm = false }) { Text("Отмена") } }
         )
     } else {
-        // ОСНОВНОЕ ОКНО РЕДАКТИРОВАНИЯ/СОЗДАНИЯ
         AlertDialog(
             onDismissRequest = onDismiss,
             title = { Text(if (isEditMode) "Редактировать" else "Новый плейлист") },
@@ -581,7 +661,6 @@ fun CreatePlaylistDialog(
                     Spacer(modifier = Modifier.height(16.dp))
                     OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Название плейлиста") }, singleLine = true)
 
-                    // ЕСЛИ МЫ В РЕЖИМЕ РЕДАКТИРОВАНИЯ — ПОКАЗЫВАЕМ КНОПКУ УДАЛИТЬ
                     if (isEditMode) {
                         Spacer(modifier = Modifier.height(16.dp))
                         TextButton(

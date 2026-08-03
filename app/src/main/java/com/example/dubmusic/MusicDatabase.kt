@@ -9,10 +9,13 @@ data class TrackEntity(
     val fileName: String,
     val title: String? = null,
     val artist: String? = null,
-    val album: String? = null,
+    val album: String? = "Неизвестный альбом",
+    val year: Int? = null,
     val isProcessed: Boolean = false,
     val isHidden: Boolean = false,
-    val durationMs: Long = 0L // Добавили для подсчета времени!
+    val durationMs: Long = 0L, // Для подсчета времени!
+    val isDemo: Boolean = false, // <--- флаг для демо-версий треков из альбома
+    val isUnreleased: Boolean = false // <--- флаг невыпущенного трека
 )
 
 // 1. Таблица Плейлистов
