@@ -698,7 +698,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             musicService?.resume()
             _isPlaying.value = true
+
+            // Будим сервис, если система успела его приглушить без уведомления
+            val intent = android.content.Intent(getApplication(), MusicService::class.java)
+            getApplication<android.app.Application>().startForegroundService(intent)
         }
+
         // Обновляем кнопку Play/Pause в шторке
         _currentTrack.value?.let { track ->
             musicService?.updateNotification(

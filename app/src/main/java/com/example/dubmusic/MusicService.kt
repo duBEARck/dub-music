@@ -189,7 +189,14 @@ class MusicService : Service() {
             notificationBuilder.setLargeIcon(albumBitmap)
         }
 
-        startForeground(1, notificationBuilder.build())
+        val notification = notificationBuilder.build()
+
+        // 1. Сообщаем системе, что мы активный сервис
+        startForeground(1, notification)
+
+        // 2. ПРИНУДИТЕЛЬНО рисуем уведомление, если пользователь его смахнул
+        val manager = getSystemService(NotificationManager::class.java)
+        manager?.notify(1, notification)
     }
 
     override fun onBind(intent: Intent?): IBinder {

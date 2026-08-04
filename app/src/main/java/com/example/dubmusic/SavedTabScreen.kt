@@ -93,7 +93,13 @@ fun SavedTabScreen(viewModel: MusicViewModel) {
                         track = track,
                         onEdit = { trackToEdit = track },
                         onHide = { viewModel.hideTrack(track) },
-                        onPlay = { viewModel.playTrack(track) }
+                        onPlay = {
+                            viewModel.playTrack(
+                                track = track,
+                                playlist = tracks,
+                                forcedTitle = "Необработанные"
+                            )
+                        }
                     )
                 }
             }
