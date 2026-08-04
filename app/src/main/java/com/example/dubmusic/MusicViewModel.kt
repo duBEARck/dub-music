@@ -696,15 +696,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             musicService?.pause()
             _isPlaying.value = false
         } else {
+            // --- ДОБАВЛЕННЫЙ КОД ДЛЯ ВОСКРЕШЕНИЯ СЕРВИСА ---
+            // Жестко заставляем систему поднять сервис из мертвых, если она его убила
+            val intent = android.content.Intent(getApplication(), MusicService::class.java)
+            getApplication<android.app.Application>().startService(intent)
+            // -----------------------------------------------
+
             musicService?.resume()
             _isPlaying.value = true
-
-            // Будим сервис, если система успела его приглушить без уведомления
-            val intent = android.content.Intent(getApplication(), MusicService::class.java)
-            getApplication<android.app.Application>().startForegroundService(intent)
         }
 
-        // Обновляем кнопку Play/Pause в шторке
+        // Обновляем уведомление
         _currentTrack.value?.let { track ->
             musicService?.updateNotification(
                 title = track.title ?: track.fileName,

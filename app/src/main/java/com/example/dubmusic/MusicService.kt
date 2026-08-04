@@ -113,7 +113,12 @@ class MusicService : Service() {
         var albumBitmap: Bitmap? = null
 
         if (track != null && !track.artist.isNullOrBlank() && !track.album.isNullOrBlank()) {
-            val albumPhotoKey = "album_photo_${track.artist}_${track.album}"
+
+            // --- ИСПРАВЛЕНИЕ: Отсекаем гостей для поиска картинки ---
+            val primaryArtist = track.artist.split(",").map { it.trim() }.firstOrNull { it.isNotBlank() } ?: track.artist
+            val albumPhotoKey = "album_photo_${primaryArtist}_${track.album}"
+            // ---------------------------------------------------------
+
             val prefs = getSharedPreferences("artist_photos", Context.MODE_PRIVATE)
             val coverPath = prefs.getString(albumPhotoKey, null)
 
@@ -121,14 +126,12 @@ class MusicService : Service() {
                 try {
                     val originalBitmap = BitmapFactory.decodeFile(coverPath)
                     if (originalBitmap != null) {
-                        // --- ИДЕАЛЬНОЕ КАЧЕСТВО ДЛЯ ШТОРКИ ---
-                        // 1. Делаем ровный квадрат
+                        // --- ИДЕАЛЬНОЕ КАЧЕСТВО ДЛЯ ШТОРКИ (Твой код) ---
                         val size = Math.min(originalBitmap.width, originalBitmap.height)
                         val x = (originalBitmap.width - size) / 2
                         val y = (originalBitmap.height - size) / 2
                         val squaredBitmap = Bitmap.createBitmap(originalBitmap, x, y, size, size)
 
-                        // 2. Сжимаем до стандарта Android (512x512)
                         albumBitmap = Bitmap.createScaledBitmap(squaredBitmap, 512, 512, true)
                     }
                 } catch (e: Exception) {
@@ -136,6 +139,8 @@ class MusicService : Service() {
                 }
             }
         }
+
+        // ... ДАЛЬШЕ ВЕСЬ ТВОЙ КОД БЕЗ ИЗМЕНЕНИЙ (val duration = ...) ...
 
         val duration = mediaPlayer?.duration?.toLong() ?: 0L
         val position = mediaPlayer?.currentPosition?.toLong() ?: 0L
@@ -178,7 +183,7 @@ class MusicService : Service() {
             .addAction(playPauseIcon, "Play/Pause", playPauseIntent)
             .addAction(R.drawable.ic_next, "Next", nextIntent)
             .setStyle(
-                MediaStyle()
+                androidx.media.app.NotificationCompat.MediaStyle()
                     .setShowActionsInCompactView(0, 1, 2)
                     .setMediaSession(mediaSession.sessionToken)
             )
@@ -191,10 +196,8 @@ class MusicService : Service() {
 
         val notification = notificationBuilder.build()
 
-        // 1. Сообщаем системе, что мы активный сервис
         startForeground(1, notification)
 
-        // 2. ПРИНУДИТЕЛЬНО рисуем уведомление, если пользователь его смахнул
         val manager = getSystemService(NotificationManager::class.java)
         manager?.notify(1, notification)
     }
