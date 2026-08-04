@@ -77,8 +77,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         return dao.getDynamicArtistTopTracks(artistName)
     }
 
-    fun openArtist(name: String?) { _openedArtistName.value = name }
-    fun openAlbum(title: String?) { _openedAlbumTitle.value = title }
+    fun openArtist(name: String?) {
+        _openedArtistName.value = name
+        _openedAlbumTitle.value = null // СБРОС АЛЬБОМА (чтобы не застрять в старом релизе)
+    }
+
+    fun openAlbum(title: String?, artistName: String? = null) {
+        _openedAlbumTitle.value = title
+        if (artistName != null) {
+            _openedArtistName.value = artistName // Автоматически подтягиваем нужного артиста как фон
+        }
+    }
 
     init {
         // Запускаем сборку библиотеки сразу при создании ViewModel и при любых изменениях в базе
@@ -263,25 +272,61 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    val topArtistsStats = periodBounds.flatMapLatest { bounds ->
-        dao.getTopArtists(bounds.first, bounds.second)
-    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
-
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     val topTracksByCountStats = periodBounds.flatMapLatest { bounds ->
         dao.getTopTracksByCount(bounds.first, bounds.second)
     }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val topArtistsStats = periodBounds.flatMapLatest { bounds ->
+        dao.getAllTrackStatsForPeriod(bounds.first, bounds.second).mapLatest { trackStats ->
+            val artistMap = mutableMapOf<String, Long>()
+            trackStats.forEach { ts ->
+                // Разбиваем строку "Артист 1, Артист 2" на отдельных артистов
+                val artists = ts.track.artist?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() } ?: listOf("Неизвестный исполнитель")
+                artists.forEach { a ->
+                    artistMap[a] = (artistMap[a] ?: 0L) + ts.statValue
+                }
+            }
+            // Собираем обратно в список и сортируем
+            artistMap.map { ArtistStat(it.key, it.value) }.sortedByDescending { it.statValue }.take(5)
+        }
+    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     val topArtistsByCountStats = periodBounds.flatMapLatest { bounds ->
-        dao.getTopArtistsByCount(bounds.first, bounds.second)
+        dao.getAllTrackCountsForPeriod(bounds.first, bounds.second).mapLatest { trackStats ->
+            val artistMap = mutableMapOf<String, Long>()
+            trackStats.forEach { ts ->
+                val artists = ts.track.artist?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() } ?: listOf("Неизвестный исполнитель")
+                artists.forEach { a ->
+                    artistMap[a] = (artistMap[a] ?: 0L) + ts.statValue
+                }
+            }
+            artistMap.map { ArtistStat(it.key, it.value) }.sortedByDescending { it.statValue }.take(5)
+        }
     }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
 
     // --- ГЛОБАЛЬНЫЕ МЕТРИКИ (НЕ ЗАВИСЯТ ОТ ФИЛЬТРА ВРЕМЕНИ) ---
-    // Передаем 0 и Long.MAX_VALUE, чтобы вытащить данные за всё время
-    val loyaltyArtists = dao.getTopArtistsByDays(0L, Long.MAX_VALUE)
-        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
+    val loyaltyArtists = dao.getFullHistoryArtists().mapLatest { history ->
+        val artistDays = mutableMapOf<String, MutableSet<String>>()
+        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
 
+        history.forEach { item ->
+            // Переводим миллисекунды в строку даты (чтобы считать только уникальные дни)
+            val dateStr = sdf.format(java.util.Date(item.timestamp))
+            val artists = item.trackArtist?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() } ?: listOf("Неизвестный исполнитель")
+
+            artists.forEach { a ->
+                if (artistDays[a] == null) artistDays[a] = mutableSetOf()
+                artistDays[a]!!.add(dateStr)
+            }
+        }
+
+        // Считаем размер Set (количество уникальных дней) для каждого артиста
+        artistDays.map { ArtistDaysStat(it.key, it.value.size) }
+            .sortedByDescending { it.daysCount }
+            .take(5)
+    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     val bingeRecord = dao.getHistoryUris().mapLatest { uris ->
         var maxStreak = 0L
@@ -707,52 +752,77 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _artistsList = MutableStateFlow<List<Artist>>(emptyList())
     val artistsList = _artistsList.asStateFlow()
 
+    // Вспомогательный класс для временного сбора данных артиста
+    private class ArtistData {
+        val albums = mutableListOf<Album>()
+        val appearances = mutableSetOf<Album>() // Используем Set, чтобы альбомы не дублировались
+        val allTracks = mutableSetOf<TrackEntity>()
+    }
+
     private fun buildLibrary(tracks: List<TrackEntity>) {
-        // 1. Группируем общую кучу треков по именам артистов
-        val groupedByArtist = tracks.groupBy { it.artist ?: "Неизвестный исполнитель" }
+        val artistDataMap = mutableMapOf<String, ArtistData>()
 
-        val newArtistsList = groupedByArtist.map { (artistName, artistTracks) ->
+        // 1. Группируем треки по ГЛАВНОМУ артисту (первому до запятой)
+        val groupedByPrimaryArtist = tracks.groupBy { track ->
+            val trackArtists = track.artist?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() }
+            trackArtists?.firstOrNull() ?: "Неизвестный исполнитель"
+        }
 
-            // 2. Внутри каждого артиста группируем его треки по альбомам
+        groupedByPrimaryArtist.forEach { (primaryArtistName, artistTracks) ->
+            // 2. Внутри главного артиста собираем его альбомы
             val groupedByAlbum = artistTracks.groupBy { it.album ?: "Неизвестный альбом" }
 
-            val albumList = groupedByAlbum.map { (albumTitle, albumTracks) ->
+            groupedByAlbum.forEach { (albumTitle, albumTracks) ->
                 val releaseYear = albumTracks.firstNotNullOfOrNull { it.year }
-
-                // --- СОРТИРУЕМ ВСЕ ТРЕКИ ПО СОХРАНЕННОМУ ПОРЯДКУ ---
-                val sortedTracks = albumTracks.sortedBy { it.albumOrder }
-
-                // Фильтруем треки по типам
                 val regular = albumTracks.filter { !it.isDemo && !it.isUnreleased }
                 val demos = albumTracks.filter { it.isDemo }
                 val unreleased = albumTracks.filter { it.isUnreleased }
+                val albumPhotoKey = "album_photo_${primaryArtistName}_${albumTitle}"
 
-                // Ключ для хранения обложки альбома в prefs
-                val albumPhotoKey = "album_photo_${artistName}_${albumTitle}"
-
-                Album(
+                val album = Album(
                     title = albumTitle,
-                    artist = artistName,
+                    artist = primaryArtistName,
                     year = releaseYear,
-                    coverUri = prefs.getString(albumPhotoKey, null), // Читаем сохраненный путь к обложке
+                    coverUri = prefs.getString(albumPhotoKey, null),
                     regularTracks = regular,
                     demoTracks = demos,
                     unreleasedTracks = unreleased,
                     hasDemosEnabled = demos.isNotEmpty(),
                     hasUnreleasedEnabled = unreleased.isNotEmpty()
                 )
-            }.sortedBy { it.year ?: 0 } // <-- Сортируем альбомы по хронологии!
 
+                // Добавляем альбом в ОСНОВНЫЕ релизы главного артиста
+                val pArtistData = artistDataMap.getOrPut(primaryArtistName) { ArtistData() }
+                pArtistData.albums.add(album)
+                pArtistData.allTracks.addAll(albumTracks)
+
+                // 3. ИЩЕМ ФИТЫ: пробегаемся по трекам и смотрим, есть ли гости
+                albumTracks.forEach { track ->
+                    val trackArtists = track.artist?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() } ?: emptyList()
+                    if (trackArtists.size > 1) {
+                        // Раскидываем этот альбом всем остальным гостям в "Участия"
+                        trackArtists.drop(1).forEach { guestName ->
+                            val gArtistData = artistDataMap.getOrPut(guestName) { ArtistData() }
+                            gArtistData.appearances.add(album)
+                            gArtistData.allTracks.add(track) // Даем гостю возможность играть этот трек из своего профиля
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Упаковываем всё обратно в красивый список
+        val newArtistsList = artistDataMap.map { (artistName, data) ->
             Artist(
                 name = artistName,
-                photoUri = prefs.getString(artistName, null), // <--- Читаем из памяти устройства!
-                albums = albumList,
-                topTracks = artistTracks.take(5),
-                allTracks = artistTracks
+                photoUri = prefs.getString(artistName, null),
+                albums = data.albums.distinctBy { it.title }.sortedBy { it.year ?: 0 },
+                appearances = data.appearances.toList().distinctBy { it.title }.sortedBy { it.year ?: 0 },
+                topTracks = data.allTracks.toList().take(5),
+                allTracks = data.allTracks.toList()
             )
-        }.sortedBy { it.name } // Сортируем самих артистов по алфавиту для вкладки Статистика
+        }.sortedByDescending { it.allTracks.size } // <--- СОРТИРУЕМ ПО КОЛИЧЕСТВУ ТРЕКОВ
 
-        // Отдаем готовый список интерфейсу
         _artistsList.value = newArtistsList
     }
 
@@ -809,10 +879,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Получить путь к обложке альбома по имени артиста и названию альбома
+    // Получить путь к обложке альбома по имени артиста (учитывая фиты!)
     fun getAlbumCoverPath(artistName: String?, albumTitle: String?): String? {
         if (artistName.isNullOrBlank() || albumTitle.isNullOrBlank()) return null
-        val albumPhotoKey = "album_photo_${artistName}_${albumTitle}"
+        // Берем только ГЛАВНОГО артиста (первого до запятой), так как обложка привязана к нему
+        val primaryArtist = artistName.split(",").map { it.trim() }.firstOrNull { it.isNotBlank() } ?: "Неизвестный исполнитель"
+        val albumPhotoKey = "album_photo_${primaryArtist}_${albumTitle}"
         return prefs.getString(albumPhotoKey, null)
+    }
+
+    // Вспомогательная функция для получения фото ЛЮБОГО артиста по имени
+    fun getArtistPhotoPath(artistName: String): String? {
+        return prefs.getString(artistName.trim(), null)
     }
 }

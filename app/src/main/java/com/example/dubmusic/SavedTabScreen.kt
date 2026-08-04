@@ -137,7 +137,7 @@ fun EditTrackDialog(
                 OutlinedTextField(
                     value = artistText,
                     onValueChange = { artistText = it },
-                    label = { Text("Исполнитель") },
+                    label = { Text("Исполнители (через запятую)") },
                     singleLine = true
                 )
                 OutlinedTextField(

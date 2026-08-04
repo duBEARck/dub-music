@@ -77,6 +77,11 @@ data class HeatmapStat(
     val totalMs: Long
 )
 
+data class TrackHistoryInfo(
+    val trackArtist: String?,
+    val timestamp: Long
+)
+
 @Dao
 interface TrackDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
@@ -151,36 +156,35 @@ interface TrackDao {
     """)
     fun getTopTracks(startTime: Long, endTime: Long): Flow<List<TrackStat>>
 
-    // 4. Топ 5 артистов по времени за период
+    // 4-5. Для правильного подсчета топа артистов в Kotlin (учитывая фиты)
     @Query("""
-        SELECT t.artist, SUM(h.durationPlayedMs) as statValue FROM tracks t
+        SELECT t.*, SUM(h.durationPlayedMs) as statValue FROM tracks t
         INNER JOIN listening_history h ON t.uri = h.trackUri
-        WHERE h.timestamp BETWEEN :startTime AND :endTime AND t.artist IS NOT NULL
-        GROUP BY t.artist
-        ORDER BY statValue DESC
-        LIMIT 5
+        WHERE h.timestamp BETWEEN :startTime AND :endTime
+        GROUP BY t.uri
     """)
-    fun getTopArtists(startTime: Long, endTime: Long): Flow<List<ArtistStat>>
+    fun getAllTrackStatsForPeriod(startTime: Long, endTime: Long): Flow<List<TrackStat>>
 
-    // 5. Топ 5 артистов ПО УНИКАЛЬНЫМ ДНЯМ
-    // Секрет: date(h.timestamp / 1000, 'unixepoch', 'localtime') превращает миллисекунды в строку 'YYYY-MM-DD',
-    // а COUNT(DISTINCT ...) считает только уникальные дни!
     @Query("""
-        SELECT t.artist, COUNT(DISTINCT date(h.timestamp / 1000, 'unixepoch', 'localtime')) as daysCount 
-        FROM tracks t
+        SELECT t.*, COUNT(h.id) as statValue FROM tracks t
         INNER JOIN listening_history h ON t.uri = h.trackUri
-        WHERE h.timestamp BETWEEN :startTime AND :endTime AND t.artist IS NOT NULL
-        GROUP BY t.artist
-        ORDER BY daysCount DESC
-        LIMIT 5
+        WHERE h.timestamp BETWEEN :startTime AND :endTime
+        GROUP BY t.uri
     """)
-    fun getTopArtistsByDays(startTime: Long, endTime: Long): Flow<List<ArtistDaysStat>>
+    fun getAllTrackCountsForPeriod(startTime: Long, endTime: Long): Flow<List<TrackStat>>
 
-    // 6. ДИНАМИЧЕСКИЙ ТОП АРТИСТА (треки сортируются лично под пользователя)
+    @Query("""
+        SELECT t.artist as trackArtist, h.timestamp 
+        FROM listening_history h
+        INNER JOIN tracks t ON h.trackUri = t.uri
+    """)
+    fun getFullHistoryArtists(): Flow<List<TrackHistoryInfo>>
+
+    // 6. ДИНАМИЧЕСКИЙ ТОП АРТИСТА (треки сортируются лично под пользователя, включая фиты)
     @Query("""
         SELECT t.* FROM tracks t
         LEFT JOIN listening_history h ON t.uri = h.trackUri
-        WHERE t.artist = :artistName
+        WHERE t.artist LIKE '%' || :artistName || '%'
         GROUP BY t.uri
         ORDER BY SUM(COALESCE(h.durationPlayedMs, 0)) DESC
     """)
