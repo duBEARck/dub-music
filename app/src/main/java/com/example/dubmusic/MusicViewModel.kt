@@ -29,6 +29,15 @@ import java.io.File
 import java.io.FileOutputStream
 import kotlinx.coroutines.flow.flatMapLatest
 
+// Контейнер для вытащенных данных (ID3 данных из mp3 файла)
+data class SmartMetadata(
+    val realFileName: String,
+    val title: String?,
+    val artist: String?,
+    val album: String?,
+    val year: Int?,
+    val coverArt: ByteArray? // Картинка в сыром виде (байты)
+)
 enum class PlaybackMode {
     NORMAL, SHUFFLE, REPEAT_ALL, REPEAT_ONE
 }
@@ -97,49 +106,52 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 buildLibrary(tracks)
             }
         }
+
+        // --- РАЗОВАЯ ЧИСТКА СТАРЫХ ТРЕКОВ ---
+        // (Можешь просто удалить этот блок после одного запуска приложения)
+        viewModelScope.launch(Dispatchers.IO) {
+            val unprocessed = dao.getUnprocessedTracks().firstOrNull() ?: emptyList()
+            unprocessed.forEach { track ->
+                val smartData = extractMetadata(track.uri)
+                dao.updateTrack(track.copy(
+                    fileName = smartData.realFileName,
+                    title = smartData.title,
+                    artist = smartData.artist,
+                    album = smartData.album,
+                    year = smartData.year
+                ))
+            }
+        }
     }
 
     // Функция добавления файлов из проводника
-    fun addUnprocessedFile(uriString: String, fileName: String) {
+    fun addUnprocessedFile(uriString: String) {
         viewModelScope.launch(Dispatchers.IO) {
             var duration = 0L
-            var extractedTitle: String? = null
-            var extractedArtist: String? = null
-            var extractedAlbum: String? = null
-            var extractedYear: Int? = null
+            val smartData = extractMetadata(uriString)
 
             try {
-                // Запускаем системный сканер файла
                 val retriever = MediaMetadataRetriever()
                 retriever.setDataSource(getApplication(), Uri.parse(uriString))
-
-                // Вытаскиваем длину трека
                 val timeString = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                 duration = timeString?.toLong() ?: 0L
-
-                // --- НОВОЕ: Сразу вытаскиваем все метаданные ---
-                extractedTitle = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
-                extractedArtist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
-                extractedAlbum = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)
-                val yearString = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_YEAR)
-                extractedYear = yearString?.toIntOrNull() // Превращаем текст в число
-
                 retriever.release()
             } catch (e: Exception) {
-                e.printStackTrace() // Если файл битый, длина останется 0
+                e.printStackTrace()
             }
 
-            // Сохраняем в базу ВСЁ ВМЕСТЕ
+            // Сохраняем в базу с реальным именем и найденными тегами
             dao.insertTrack(
                 TrackEntity(
                     uri = uriString,
-                    fileName = fileName,
+                    fileName = smartData.realFileName,
                     durationMs = duration,
-                    title = extractedTitle,
-                    artist = extractedArtist,
-                    album = extractedAlbum,
-                    year = extractedYear,
-                    isDemo = false
+                    title = smartData.title,
+                    artist = smartData.artist,
+                    album = smartData.album,
+                    year = smartData.year,
+                    isDemo = false,
+                    isUnreleased = false
                 )
             )
         }
@@ -176,13 +188,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun processTrack(track: TrackEntity, title: String, artist: String, album: String, year: Int? = null) {
+    fun processTrack(track: TrackEntity, title: String, artist: String, album: String, year: Int? = null, isDemo: Boolean = false, isUnreleased: Boolean = false) {
         viewModelScope.launch(Dispatchers.IO) {
             val updatedTrack = track.copy(
                 title = title,
                 artist = artist.ifBlank { "Неизвестный исполнитель" },
-                album = album.ifBlank { null },
-                year = year ?: track.year, // Обновляем год
+                album = album.ifBlank { null }, // Если пусто - сохранится как null
+                year = year ?: track.year,
+                isDemo = isDemo,             // <--- Сохраняем флаг
+                isUnreleased = isUnreleased, // <--- Сохраняем флаг
                 isProcessed = true
             )
             dao.updateTrack(updatedTrack)
@@ -327,36 +341,40 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             .sortedByDescending { it.daysCount }
             .take(5)
     }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
+
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    val bingeRecord = dao.getHistoryUris().mapLatest { uris ->
-        var maxStreak = 0L
+    val bingeRecords = dao.getHistoryUris().mapLatest { uris ->
+        val maxStreaks = mutableMapOf<String, Long>()
         var currentStreak = 0L
-        var bestUri: String? = null
         var currentUri: String? = null
 
-        // Пробегаемся по всей истории и считаем повторы подряд
+        // Пробегаемся по всей истории
         for (uri in uris) {
             if (uri == currentUri) {
                 currentStreak++
             } else {
+                // Если трек сменился, сохраняем рекорд предыдущего (если он больше старого рекорда)
+                if (currentUri != null) {
+                    maxStreaks[currentUri] = maxOf(maxStreaks[currentUri] ?: 0L, currentStreak)
+                }
                 currentUri = uri
                 currentStreak = 1L
             }
-            // Запоминаем рекордсмена
-            if (currentStreak > maxStreak) {
-                maxStreak = currentStreak
-                bestUri = currentUri
-            }
+        }
+        // Не забываем сохранить самый последний трек в списке
+        if (currentUri != null) {
+            maxStreaks[currentUri] = maxOf(maxStreaks[currentUri] ?: 0L, currentStreak)
         }
 
-        // Если нашли рекордсмена - достаем его из базы и упаковываем для интерфейса
-        if (bestUri != null) {
-            val track = dao.getTrackByUri(bestUri).firstOrNull()
-            if (track != null) TrackStat(track, maxStreak) else null
-        } else {
-            null
-        }
-    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), null)
+        // Сортируем по убыванию, берем топ-5 и превращаем в TrackStat
+        maxStreaks.entries
+            .sortedByDescending { it.value }
+            .take(5)
+            .mapNotNull { entry ->
+                val track = dao.getTrackByUri(entry.key).firstOrNull()
+                if (track != null) TrackStat(track, entry.value) else null
+            }
+    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
 
     // --- ТЕПЛОВАЯ КАРТА ---
     val heatmapDays = dao.getHeatmapDays().stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
@@ -518,7 +536,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _progress = MutableStateFlow(0f)
     val progress: StateFlow<Float> = _progress.asStateFlow()
 
-    fun playTrack(track: TrackEntity, playlist: List<TrackEntity>? = null, forcedTitle: String? = null) {
+    fun playTrack(track: TrackEntity, playlist: List<TrackEntity>? = null, forcedTitle: String? = null, isAutomatic: Boolean = false) {
+
+        // --- СБРОС ПОВТОРА ОДНОГО ТРЕКА ПРИ РУЧНОМ ПЕРЕКЛЮЧЕНИИ ---
+        if (!isAutomatic && _playbackMode.value == PlaybackMode.REPEAT_ONE) {
+            _playbackMode.value = PlaybackMode.NORMAL
+        }
 
         // --- ЗАПИСЬ СТАТИСТИКИ ПРЕДЫДУЩЕГО ТРЕКА ---
         _currentTrack.value?.let { prevTrack ->
@@ -535,7 +558,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
-        // ------------------------------------------
 
         if (playlist != null) {
             currentQueue = playlist
@@ -573,7 +595,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 _currentTime.value = "0:00"
                 progressJob?.cancel()
             } else {
-                playNext()
+                playNext(isAutomatic = true) // <-- ПЕРЕДАЕМ ФЛАГ АВТОМАТИКИ!
             }
         }
 
@@ -593,28 +615,30 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         getApplication<android.app.Application>().startForegroundService(intent)
     }
 
-    fun playNext() {
+    fun playNext(isAutomatic: Boolean = false) {
         if (currentQueue.isEmpty() || currentQueueIndex == -1) return
+
+        // Если переключили трек кнопкой "Вперед" — сбрасываем залипание на одной песне
+        if (!isAutomatic && _playbackMode.value == PlaybackMode.REPEAT_ONE) {
+            _playbackMode.value = PlaybackMode.NORMAL
+        }
 
         when (_playbackMode.value) {
             PlaybackMode.REPEAT_ONE -> {
-                // Запускаем тот же самый трек
-                playTrack(currentQueue[currentQueueIndex])
+                // Запускаем тот же самый трек (работает только если isAutomatic = true)
+                playTrack(currentQueue[currentQueueIndex], isAutomatic = true)
             }
             PlaybackMode.SHUFFLE -> {
-                // Выбираем случайную позицию из списка
                 val nextIndex = currentQueue.indices.random()
-                playTrack(currentQueue[nextIndex])
+                playTrack(currentQueue[nextIndex], isAutomatic = true)
             }
             PlaybackMode.REPEAT_ALL -> {
-                // Если дошли до конца, перекидываем на 0
                 val nextIndex = if (currentQueueIndex < currentQueue.size - 1) currentQueueIndex + 1 else 0
-                playTrack(currentQueue[nextIndex])
+                playTrack(currentQueue[nextIndex], isAutomatic = true)
             }
             PlaybackMode.NORMAL -> {
-                // Играем следующий или останавливаем, если это был последний
                 if (currentQueueIndex < currentQueue.size - 1) {
-                    playTrack(currentQueue[currentQueueIndex + 1])
+                    playTrack(currentQueue[currentQueueIndex + 1], isAutomatic = true)
                 } else {
                     musicService?.pause()
                     _isPlaying.value = false
@@ -626,30 +650,33 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun playPrev() {
         if (currentQueue.isEmpty() || currentQueueIndex == -1) return
 
+        // Назад мы всегда переключаем вручную, так что смело сбрасываем репит
+        if (_playbackMode.value == PlaybackMode.REPEAT_ONE) {
+            _playbackMode.value = PlaybackMode.NORMAL
+        }
+
         val currentPosition = musicService?.getCurrentPosition() ?: 0
-        // Если прошло больше 5 секунд - всегда начинаем заново, независимо от режима
+
+        // Если прошло больше 5 секунд - начинаем трек заново
         if (currentPosition > 5000) {
-            _isPlaying.value = true      // 1. Сначала говорим, что музыка играет
-            musicService?.resume()       // 2. Запускаем плеер
-            seekTo(0f)                  // 3. Перематываем (это автоматически обновит шторку!)
+            _isPlaying.value = true
+            musicService?.resume()
+            seekTo(0f)
         } else {
-            // Прошло меньше 5 секунд -> переключаем на предыдущий
+            // Переключаем на предыдущий
             when (_playbackMode.value) {
-                PlaybackMode.REPEAT_ONE -> playTrack(currentQueue[currentQueueIndex])
+                PlaybackMode.REPEAT_ONE -> playTrack(currentQueue[currentQueueIndex], isAutomatic = true)
                 PlaybackMode.SHUFFLE -> {
                     val prevIndex = currentQueue.indices.random()
-                    playTrack(currentQueue[prevIndex])
+                    playTrack(currentQueue[prevIndex], isAutomatic = true)
                 }
-
                 PlaybackMode.REPEAT_ALL -> {
-                    val prevIndex =
-                        if (currentQueueIndex > 0) currentQueueIndex - 1 else currentQueue.size - 1
-                    playTrack(currentQueue[prevIndex])
+                    val prevIndex = if (currentQueueIndex > 0) currentQueueIndex - 1 else currentQueue.size - 1
+                    playTrack(currentQueue[prevIndex], isAutomatic = true)
                 }
-
                 PlaybackMode.NORMAL -> {
                     if (currentQueueIndex > 0) {
-                        playTrack(currentQueue[currentQueueIndex - 1])
+                        playTrack(currentQueue[currentQueueIndex - 1], isAutomatic = true)
                     } else {
                         _isPlaying.value = true
                         musicService?.resume()
@@ -776,8 +803,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         groupedByPrimaryArtist.forEach { (primaryArtistName, artistTracks) ->
-            // 2. Внутри главного артиста собираем его альбомы
-            val groupedByAlbum = artistTracks.groupBy { it.album ?: "Неизвестный альбом" }
+            // Все треки, у которых поле album пустое (null), собираются в папку "Синглы"
+            val groupedByAlbum = artistTracks.groupBy { it.album ?: "Синглы" }
 
             groupedByAlbum.forEach { (albumTitle, albumTracks) ->
                 val releaseYear = albumTracks.firstNotNullOfOrNull { it.year }
@@ -861,27 +888,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Сохранение изменений альбома (Год + Статусы треков)
-    fun updateAlbumDetails(
-        album: Album,
-        newYear: Int?,
-        trackTypesMap: Map<String, String>,
-        orderedUris: List<String> // <--- НОВЫЙ ПАРАМЕТР ПОРЯДКА
-    ) {
+    fun updateAlbumDetails(album: Album, newYear: Int?, orderedUris: List<String>) {
         viewModelScope.launch(Dispatchers.IO) {
-            val allAlbumTracks = album.regularTracks + album.demoTracks + album.unreleasedTracks
-
-            allAlbumTracks.forEach { track ->
-                val type = trackTypesMap[track.uri] ?: "REGULAR"
-                val orderIndex = orderedUris.indexOf(track.uri) // Узнаем новую позицию трека
-
-                val updatedTrack = track.copy(
-                    year = newYear,
-                    isDemo = (type == "DEMO"),
-                    isUnreleased = (type == "UNRELEASED"),
-                    albumOrder = if (orderIndex != -1) orderIndex else track.albumOrder
-                )
-                dao.updateTrack(updatedTrack)
+            // Просто обновляем порядок треков и год (статусы Demo/Unreleased остаются как были)
+            orderedUris.forEachIndexed { index, uri ->
+                val track = dao.getTrackByUri(uri).firstOrNull()
+                if (track != null) {
+                    dao.updateTrack(track.copy(year = newYear, albumOrder = index))
+                }
             }
         }
     }
@@ -898,5 +912,75 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     // Вспомогательная функция для получения фото ЛЮБОГО артиста по имени
     fun getArtistPhotoPath(artistName: String): String? {
         return prefs.getString(artistName.trim(), null)
+    }
+
+
+    fun extractMetadata(uriString: String): SmartMetadata {
+        val uri = android.net.Uri.parse(uriString)
+        val context = getApplication<android.app.Application>()
+
+        // 1. ДОСТАЕМ РЕАЛЬНОЕ ИМЯ ФАЙЛА
+        var realFileName = "Неизвестный файл"
+        if (uri.scheme == "content") {
+            val cursor = context.contentResolver.query(uri, null, null, null, null)
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val index = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (index != -1) {
+                        realFileName = it.getString(index)
+                    }
+                }
+            }
+        } else {
+            // Если это обычный путь файла
+            realFileName = uri.path?.substringAfterLast('/') ?: "Неизвестный файл"
+        }
+
+        // 2. ДОСТАЕМ ID3-ТЕГИ ИЗ ВНУТРЕННОСТЕЙ ФАЙЛА
+        val retriever = android.media.MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(context, uri)
+
+            // --- НОВАЯ УМНАЯ ФУНКЦИЯ ОЧИСТКИ ТЕКСТА ---
+            fun cleanString(str: String?): String? {
+                // Отрезаем края и схлопнутые пробелы внутри (Regex("\\s+") ищет 1 и более пробелов подряд)
+                return str?.trim()?.replace(Regex("\\s+"), " ")?.takeIf { it.isNotBlank() }
+            }
+
+            val title = cleanString(retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_TITLE))
+            val artist = cleanString(retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ARTIST))
+            val album = cleanString(retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ALBUM))
+
+            val yearStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_YEAR)
+            val year = yearStr?.take(4)?.toIntOrNull()
+
+            val coverArt = retriever.embeddedPicture
+
+            // 3. ФОЛБЭК: Пытаемся угадать по имени файла
+            var finalTitle = title
+            var finalArtist = artist
+            if (title == null && artist == null && realFileName.contains("-")) {
+                val parts = realFileName.substringBeforeLast(".").split("-", limit = 2)
+                if (parts.size == 2) {
+                    finalArtist = cleanString(parts[0])
+                    finalTitle = cleanString(parts[1])
+                }
+            }
+
+            return SmartMetadata(
+                realFileName = cleanString(realFileName.substringBeforeLast(".")) ?: "Неизвестный файл",
+                title = finalTitle,
+                artist = finalArtist,
+                album = album,
+                year = year,
+                coverArt = coverArt
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            // Если что-то пошло не так, возвращаем хотя бы нормальное имя файла
+            return SmartMetadata(realFileName.substringBeforeLast("."), null, null, null, null, null)
+        } finally {
+            retriever.release() // Обязательно закрываем инструмент, чтобы не было утечек памяти
+        }
     }
 }
