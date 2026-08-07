@@ -36,7 +36,9 @@ data class SmartMetadata(
     val artist: String?,
     val album: String?,
     val year: Int?,
-    val coverArt: ByteArray? // Картинка в сыром виде (байты)
+    val coverArt: ByteArray?,
+    val trackType: String?, // НОВОЕ ПОЛЕ (DEMO, UNRELEASED)
+    val lyrics: String?
 )
 enum class PlaybackMode {
     NORMAL, SHUFFLE, REPEAT_ALL, REPEAT_ONE
@@ -44,12 +46,22 @@ enum class PlaybackMode {
 enum class StatsPeriod { DAY, WEEK, MONTH, YEAR, ALL_TIME }
 class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
-    // Инициализируем базу данных
+    // 1. ОПИСЫВАЕМ МИГРАЦИЮ С ВЕРСИИ 3 НА 4
+    private val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
+        override fun migrate(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+            // Добавляем колонку в таблицу "tracks" (так она у тебя называется в TrackEntity)
+            database.execSQL("ALTER TABLE tracks ADD COLUMN lyrics TEXT DEFAULT NULL")
+        }
+    }
+
+    // 2. БИЛДЕР: Говорим ему использовать миграцию
     private val db = Room.databaseBuilder(
         application,
         AppDatabase::class.java,
         "dubmusic-database"
-    ).build()
+    )
+        .addMigrations(MIGRATION_3_4)
+        .build()
 
     private val dao = db.trackDao()
 
@@ -128,19 +140,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun addUnprocessedFile(uriString: String) {
         viewModelScope.launch(Dispatchers.IO) {
             var duration = 0L
-            val smartData = extractMetadata(uriString)
+            val smartData = extractMetadata(uriString) // Ошибок больше не будет!
 
             try {
-                val retriever = MediaMetadataRetriever()
+                val retriever = android.media.MediaMetadataRetriever()
                 retriever.setDataSource(getApplication(), Uri.parse(uriString))
-                val timeString = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                val timeString = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
                 duration = timeString?.toLong() ?: 0L
                 retriever.release()
             } catch (e: Exception) {
                 e.printStackTrace()
             }
 
-            // Сохраняем в базу с реальным именем и найденными тегами
+            // Добавляем трек с флагами из MP3-файла
             dao.insertTrack(
                 TrackEntity(
                     uri = uriString,
@@ -150,8 +162,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     artist = smartData.artist,
                     album = smartData.album,
                     year = smartData.year,
-                    isDemo = false,
-                    isUnreleased = false
+                    isDemo = smartData.trackType == "DEMO",
+                    isUnreleased = smartData.trackType == "UNRELEASED"
                 )
             )
         }
@@ -190,13 +202,56 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun processTrack(track: TrackEntity, title: String, artist: String, album: String, year: Int? = null, isDemo: Boolean = false, isUnreleased: Boolean = false) {
         viewModelScope.launch(Dispatchers.IO) {
+            val context = getApplication<Application>().applicationContext
+            val uri = Uri.parse(track.uri)
+            val tempFile = java.io.File(context.cacheDir, "temp_tag_edit.mp3")
+
+            try {
+                // 1. Копируем файл во временную память, чтобы случайно не сломать оригинал
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    tempFile.outputStream().use { output -> input.copyTo(output) }
+                }
+
+                // 2. Вскрываем библиотекой
+                val audioFile = org.jaudiotagger.audio.AudioFileIO.read(tempFile)
+                val tag = audioFile.tagOrCreateAndSetDefault
+
+                // 3. Пишем стандартные теги
+                tag.setField(org.jaudiotagger.tag.FieldKey.TITLE, title.trim())
+                tag.setField(org.jaudiotagger.tag.FieldKey.ARTIST, artist.trim())
+                if (album.isNotBlank()) tag.setField(org.jaudiotagger.tag.FieldKey.ALBUM, album.trim())
+                if (year != null) tag.setField(org.jaudiotagger.tag.FieldKey.YEAR, year.toString())
+
+                // 4. Вшиваем кастомный статус (Demo / Unreleased)
+                val typeTag = when {
+                    isDemo -> "DEMO"
+                    isUnreleased -> "UNRELEASED"
+                    else -> "NORMAL"
+                }
+                tag.setField(org.jaudiotagger.tag.FieldKey.COMMENT, "DUBMUSIC=$typeTag")
+
+                audioFile.commit() // Сохраняем в tempFile
+
+                // 5. Перезаписываем физический файл на жестком диске телефона
+                context.contentResolver.openOutputStream(uri, "wt")?.use { output ->
+                    tempFile.inputStream().use { input -> input.copyTo(output) }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                // Если нет прав на запись, мы просто пропустим этап с файлом,
+                // но всё равно обновим приложение ниже, чтобы не бесить пользователя.
+            } finally {
+                tempFile.delete() // Убираем за собой мусор в любом случае
+            }
+
+            // 6. Обновляем локальную базу данных, чтобы интерфейс перерисовался мгновенно
             val updatedTrack = track.copy(
-                title = title,
+                title = title.trim(),
                 artist = artist.ifBlank { "Неизвестный исполнитель" },
-                album = album.ifBlank { null }, // Если пусто - сохранится как null
+                album = album.ifBlank { null },
                 year = year ?: track.year,
-                isDemo = isDemo,             // <--- Сохраняем флаг
-                isUnreleased = isUnreleased, // <--- Сохраняем флаг
+                isDemo = isDemo,
+                isUnreleased = isUnreleased,
                 isProcessed = true
             )
             dao.updateTrack(updatedTrack)
@@ -916,10 +971,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
 
     fun extractMetadata(uriString: String): SmartMetadata {
-        val uri = android.net.Uri.parse(uriString)
-        val context = getApplication<android.app.Application>()
+        val uri = Uri.parse(uriString)
+        val context = getApplication<Application>().applicationContext
 
-        // 1. ДОСТАЕМ РЕАЛЬНОЕ ИМЯ ФАЙЛА
+        // 1. Достаем реальное имя файла
         var realFileName = "Неизвестный файл"
         if (uri.scheme == "content") {
             val cursor = context.contentResolver.query(uri, null, null, null, null)
@@ -932,55 +987,125 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         } else {
-            // Если это обычный путь файла
             realFileName = uri.path?.substringAfterLast('/') ?: "Неизвестный файл"
         }
 
-        // 2. ДОСТАЕМ ID3-ТЕГИ ИЗ ВНУТРЕННОСТЕЙ ФАЙЛА
-        val retriever = android.media.MediaMetadataRetriever()
+        var title: String? = null
+        var artist: String? = null
+        var album: String? = null
+        var year: Int? = null
+        var coverArt: ByteArray? = null
+        var trackType: String? = null
+
+        // --- НОВАЯ ПЕРЕМЕННАЯ ДЛЯ ТЕКСТА ---
+        var lyricsText: String? = null
+
+        // 2. Пуленепробиваемое чтение через временный файл
+        val tempFile = java.io.File(context.cacheDir, "temp_tag_read.mp3")
         try {
-            retriever.setDataSource(context, uri)
-
-            // --- НОВАЯ УМНАЯ ФУНКЦИЯ ОЧИСТКИ ТЕКСТА ---
-            fun cleanString(str: String?): String? {
-                // Отрезаем края и схлопнутые пробелы внутри (Regex("\\s+") ищет 1 и более пробелов подряд)
-                return str?.trim()?.replace(Regex("\\s+"), " ")?.takeIf { it.isNotBlank() }
+            // Копируем файл из системы в наш кэш
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                tempFile.outputStream().use { output -> input.copyTo(output) }
             }
 
-            val title = cleanString(retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_TITLE))
-            val artist = cleanString(retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ARTIST))
-            val album = cleanString(retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ALBUM))
+            // Спокойно читаем теги нормальным путем
+            val audioFile = org.jaudiotagger.audio.AudioFileIO.read(tempFile)
+            val tag = audioFile.tag
 
-            val yearStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_YEAR)
-            val year = yearStr?.take(4)?.toIntOrNull()
+            if (tag != null) {
+                fun clean(str: String?) = str?.trim()?.replace(Regex("\\s+"), " ")?.takeIf { it.isNotBlank() }
 
-            val coverArt = retriever.embeddedPicture
+                title = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.TITLE))
+                artist = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.ARTIST))
+                album = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.ALBUM))
+                year = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.YEAR))?.take(4)?.toIntOrNull()
+                coverArt = tag.firstArtwork?.binaryData
 
-            // 3. ФОЛБЭК: Пытаемся угадать по имени файла
-            var finalTitle = title
-            var finalArtist = artist
-            if (title == null && artist == null && realFileName.contains("-")) {
-                val parts = realFileName.substringBeforeLast(".").split("-", limit = 2)
-                if (parts.size == 2) {
-                    finalArtist = cleanString(parts[0])
-                    finalTitle = cleanString(parts[1])
+                // Читаем наш секретный комментарий (DEMO / UNRELEASED)
+                val comment = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.COMMENT))
+                if (comment != null && comment.startsWith("DUBMUSIC=")) {
+                    trackType = comment.substringAfter("DUBMUSIC=")
                 }
-            }
 
-            return SmartMetadata(
-                realFileName = cleanString(realFileName.substringBeforeLast(".")) ?: "Неизвестный файл",
-                title = finalTitle,
-                artist = finalArtist,
-                album = album,
-                year = year,
-                coverArt = coverArt
-            )
+                // --- НОВОЕ: ЧИТАЕМ ТЕКСТ ИЗ ФАЙЛА ---
+                lyricsText = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.LYRICS))
+            }
         } catch (e: Exception) {
             e.printStackTrace()
-            // Если что-то пошло не так, возвращаем хотя бы нормальное имя файла
-            return SmartMetadata(realFileName.substringBeforeLast("."), null, null, null, null, null)
         } finally {
-            retriever.release() // Обязательно закрываем инструмент, чтобы не было утечек памяти
+            // Обязательно удаляем временный файл, чтобы не засорять память
+            tempFile.delete()
+        }
+
+        // 3. Фолбэк: если тегов внутри физически нет, пытаемся угадать по имени файла
+        var finalTitle = title
+        var finalArtist = artist
+        if (title == null && artist == null && realFileName.contains("-")) {
+            val parts = realFileName.substringBeforeLast(".").split("-", limit = 2)
+            if (parts.size == 2) {
+                finalArtist = parts[0].trim()
+                finalTitle = parts[1].trim()
+            }
+        }
+
+        return SmartMetadata(
+            realFileName = realFileName.substringBeforeLast("."),
+            title = finalTitle,
+            artist = finalArtist,
+            album = album,
+            year = year,
+            coverArt = coverArt,
+            trackType = trackType,
+            lyrics = lyricsText // --- ПЕРЕДАЕМ ТЕКСТ ДАЛЬШЕ ---
+        )
+    }
+
+    fun saveLyrics(track: TrackEntity, newLyrics: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val context = getApplication<Application>().applicationContext
+            val uri = Uri.parse(track.uri)
+            val tempFile = java.io.File(context.cacheDir, "temp_lyrics_edit.mp3")
+
+            try {
+                // Копируем во временный файл
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    tempFile.outputStream().use { output -> input.copyTo(output) }
+                }
+
+                // Вскрываем и пишем текст (LYRICS)
+                val audioFile = org.jaudiotagger.audio.AudioFileIO.read(tempFile)
+                val tag = audioFile.tagOrCreateAndSetDefault
+
+                if (newLyrics.isBlank()) {
+                    tag.deleteField(org.jaudiotagger.tag.FieldKey.LYRICS)
+                } else {
+                    tag.setField(org.jaudiotagger.tag.FieldKey.LYRICS, newLyrics.trim())
+                }
+
+                audioFile.commit()
+
+                // Перезаписываем физический файл
+                context.contentResolver.openOutputStream(uri, "wt")?.use { output ->
+                    tempFile.inputStream().use { input -> input.copyTo(output) }
+                }
+
+                // Обновляем базу данных
+                val updatedTrack = track.copy(lyrics = newLyrics.trim().ifBlank { null })
+                dao.updateTrack(updatedTrack)
+
+                // ==========================================
+                // ИСПРАВЛЕНИЕ: МГНОВЕННОЕ ОБНОВЛЕНИЕ ЭКРАНА
+                // ==========================================
+                if (_currentTrack.value?.uri == updatedTrack.uri) {
+                    _currentTrack.value = updatedTrack
+                    musicService?.currentTrackItem = updatedTrack
+                }
+
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                tempFile.delete()
+            }
         }
     }
 }

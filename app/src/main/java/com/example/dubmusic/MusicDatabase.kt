@@ -17,7 +17,8 @@ data class TrackEntity(
     val isDemo: Boolean = false, // <--- флаг для демо-версий треков из альбома
     val isUnreleased: Boolean = false, // <--- флаг невыпущенного трека
     val albumOrder: Int = 0, // <--- НОВОЕ ПОЛЕ ДЛЯ ПОРЯДКА В АЛЬБОМЕ
-    val dateAdded: Long = System.currentTimeMillis() // для статистики
+    val dateAdded: Long = System.currentTimeMillis(), // для статистики
+    val lyrics: String? = null // <--- текст песни
 )
 
 // --- НОВАЯ ТАБЛИЦА: ИСТОРИЯ ПРОСЛУШИВАНИЙ ---
@@ -254,7 +255,7 @@ interface TrackDao {
 
 @Database(
     entities = [TrackEntity::class, PlaylistEntity::class, PlaylistTrackCrossRef::class, ListeningHistoryEntity::class], // Добавили сюда
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

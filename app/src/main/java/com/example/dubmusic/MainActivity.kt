@@ -13,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -243,10 +244,6 @@ fun MusicAppMainScreen(viewModel: MusicViewModel) {
 
         val customPlaylists by viewModel.allPlaylists.collectAsState(initial = emptyList<PlaylistEntity>())
 
-        BackHandler(enabled = showFullScreenPlayer) {
-            showFullScreenPlayer = false
-        }
-
         AnimatedVisibility(
             visible = showFullScreenPlayer && currentTrack != null,
             enter = slideInVertically(initialOffsetY = { it }),
@@ -452,9 +449,19 @@ fun FullScreenPlayer(
     var showPlaylistSelector by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
 
+    // --- Состояния текста песни ---
+    var showLyrics by remember { mutableStateOf(false) }
+    var showLyricsEditDialog by remember { mutableStateOf(false) }
+
     // 1. ПЕРЕХВАТ СИСТЕМНОГО ЖЕСТА "НАЗАД"
-    androidx.activity.compose.BackHandler(enabled = showQueue) {
-        showQueue = false
+    androidx.activity.compose.BackHandler(enabled = true) {
+        if (showQueue) {
+            showQueue = false
+        } else if (showLyrics) {
+            showLyrics = false
+        } else {
+            onClose()
+        }
     }
 
     val artists by viewModel.artistsList.collectAsState()
@@ -465,7 +472,7 @@ fun FullScreenPlayer(
         artistPhotoUri?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } }
     }
 
-    // --- BOX-ОБЕРТКА ---
+    // --- BOX-ОБЕРТКА ВСЕГО ПЛЕЕРА ---
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -476,29 +483,26 @@ fun FullScreenPlayer(
                     onDragEnd = { if (offsetY > 300f) onClose() else offsetY = 0f }
                 ) { _, dragAmount -> if (dragAmount > 0 || offsetY > 0) offsetY += dragAmount }
             }
-            // Чтобы системный жест Назад всё ещё работал (раньше был конфликт с открытием очереди)
             .pointerInput(Unit) {
-                // Получаем ширину экрана. Мертвая зона = 120 пикселей (хватает для жеста Назад)
-                val screenWidth = size.width
+                // ИСПРАВЛЕННЫЕ СВАЙПЫ
+                val screenWidth = size.width.toFloat()
                 val edgeZone = 120f
-                var startX = 0f // Здесь будем хранить точку старта касания
+                var startX = 0f
 
                 detectHorizontalDragGestures(
-                    onDragStart = { offset ->
-                        startX = offset.x // Запоминаем, где палец коснулся экрана
-                    },
+                    onDragStart = { offset -> startX = offset.x },
                     onHorizontalDrag = { _, dragAmount ->
-                        // Если свайп начат НЕ у левого и НЕ у правого края
                         if (startX > edgeZone && startX < screenWidth - edgeZone) {
-                            if (dragAmount < -15f) { // Потянули влево
-                                showQueue = true
-                            }
+                            if (dragAmount < -15f) { showQueue = true } // Свайп влево
+                            if (dragAmount > 15f) { showLyrics = true } // Свайп вправо
                         }
                     }
                 )
             }
     ) {
-        // --- ОСНОВНОЙ ПЛЕЕР ---
+        // ==========================================
+        // ОСНОВНОЙ ПЛЕЕР
+        // ==========================================
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -598,7 +602,6 @@ fun FullScreenPlayer(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // --- СИСТЕМА ДВОЙНЫХ АВАТАРОК ---
                 val artistNames = track.artist?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() } ?: listOf("Неизвестный исполнитель")
                 var showArtistMenu by remember { mutableStateOf(false) }
 
@@ -609,14 +612,13 @@ fun FullScreenPlayer(
                             if (artistNames.size > 1) showArtistMenu = true else onNavigateToArtist(artistNames.first())
                         }
                     ) {
-                        // Если фит (больше 1 артиста), рисуем второго артиста позади (сдвинутого вправо)
                         if (artistNames.size > 1) {
                             val pic2 = viewModel.getArtistPhotoPath(artistNames[1])
                             val bmp2 = remember(pic2) { pic2?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } } }
 
                             Box(
                                 modifier = Modifier
-                                    .padding(start = 24.dp) // Сдвигаем вправо
+                                    .padding(start = 24.dp)
                                     .size(52.dp)
                                     .clip(CircleShape)
                                     .background(Color.LightGray)
@@ -628,7 +630,6 @@ fun FullScreenPlayer(
                             }
                         }
 
-                        // Первый артист (всегда рисуется поверх)
                         val pic1 = viewModel.getArtistPhotoPath(artistNames[0])
                         val bmp1 = remember(pic1) { pic1?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } } }
 
@@ -645,7 +646,6 @@ fun FullScreenPlayer(
                         }
                     }
 
-                    // ВЫПАДАЮЩЕЕ МЕНЮ ВЫБОРА АРТИСТА (Для фитов)
                     DropdownMenu(expanded = showArtistMenu, onDismissRequest = { showArtistMenu = false }) {
                         artistNames.forEach { aName ->
                             DropdownMenuItem(
@@ -663,22 +663,22 @@ fun FullScreenPlayer(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             text = track.title ?: track.fileName,
-                            fontSize = 20.sp, // <--- УМЕНЬШИЛИ ШРИФТ
+                            fontSize = 20.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
-                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier
-                                .weight(1f) // <--- Убрали fill = false
+                                .weight(1f)
                                 .clickable { track.album?.let { onNavigateToAlbum(it) } }
                         )
                         TrackBadge(isDemo = track.isDemo, isUnreleased = track.isUnreleased)
                     }
                     Text(
                         text = track.artist ?: "Неизвестный исполнитель",
-                        fontSize = 14.sp, // <--- УМЕНЬШИЛИ ШРИФТ АРТИСТА
+                        fontSize = 14.sp,
                         color = Color.Gray,
                         maxLines = 1,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -726,6 +726,7 @@ fun FullScreenPlayer(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                IconButton(onClick = { showLyrics = true }, modifier = Modifier.background(Color.Transparent, CircleShape)) {Icon(Icons.Default.Subject, contentDescription = "Текст песни", tint = Color.Gray, modifier = Modifier.size(24.dp)) }
                 val isShuffle = playbackMode == PlaybackMode.SHUFFLE
                 IconButton(onClick = { onToggleMode(PlaybackMode.SHUFFLE) }, modifier = Modifier.background(if (isShuffle) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent, CircleShape)) { Icon(Icons.Default.Shuffle, contentDescription = "Случайный порядок", tint = if (isShuffle) MaterialTheme.colorScheme.primary else Color.Gray) }
                 val isRepeatAll = playbackMode == PlaybackMode.REPEAT_ALL
@@ -766,7 +767,9 @@ fun FullScreenPlayer(
             )
         }
 
-        // --- БОКОВАЯ ШТОРКА ОЧЕРЕДИ ---
+        // ==========================================
+        // БОКОВАЯ ШТОРКА ОЧЕРЕДИ
+        // ==========================================
         AnimatedVisibility(
             visible = showQueue,
             enter = fadeIn(),
@@ -791,7 +794,6 @@ fun FullScreenPlayer(
                     .fillMaxHeight()
                     .fillMaxWidth(0.85f)
                     .shadow(16.dp)
-                    // 2. СЕРО-ФИОЛЕТОВЫЙ ФОН: Используем системный вариант Material 3
                     .background(MaterialTheme.colorScheme.surfaceVariant)
                     .pointerInput(Unit) {
                         detectHorizontalDragGestures { _, dragAmount ->
@@ -802,9 +804,7 @@ fun FullScreenPlayer(
                     .statusBarsPadding()
             ) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp), // Убрали гигантский отступ сверху и снизу
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(onClick = { showQueue = false }) {
@@ -814,71 +814,34 @@ fun FullScreenPlayer(
                     Text("Очередь", fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 }
 
-                // 3. НОВЫЙ БЛОК: ХЕДЕР ОЧЕРЕДИ С КАРТИНКОЙ И ВЫДЕЛЕНИЕМ
                 val isAllDownloaded = (queueTitle == "Все скачанные треки")
                 val isArtistTracks = queueTitle.startsWith("Треки: ")
                 val matchedPlaylist = if (!isAllDownloaded && !isArtistTracks) playlists.find { it.name == queueTitle } else null
-
-                // 1. Ищем фото артиста, если сейчас играют его треки
                 val headerArtistPhotoUri = remember(artists, queueTitle, isArtistTracks) {
                     if (isArtistTracks) {
                         val artistName = queueTitle.removePrefix("Треки: ").trim()
                         artists.find { it.name == artistName }?.photoUri
                     } else null
                 }
-
-                // 2. Ищем обложку плейлиста или альбома
-                // Берём путь к файлу ТОЛЬКО если это не "Все скачанные треки"
                 val headerCoverPath = matchedPlaylist?.imageUri ?: if (!isAllDownloaded && !isArtistTracks) viewModel.getAlbumCoverPath(track.artist, track.album) else null
-
-                // 3. Декодируем итоговую картинку (либо артист, либо обложка)
                 val headerBitmap = remember(headerCoverPath, headerArtistPhotoUri) {
                     val finalPath = headerArtistPhotoUri ?: headerCoverPath
                     finalPath?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } }
                 }
 
                 Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color.Black.copy(alpha = 0.05f))
-                        .padding(horizontal = 16.dp, vertical = 16.dp)
+                    modifier = Modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.05f)).padding(horizontal = 16.dp, vertical = 16.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-
-                        // 1. Если это "Все скачанные треки"
                         if (isAllDownloaded) {
-                            Box(
-                                modifier = Modifier
-                                    .size(80.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(MaterialTheme.colorScheme.primary),
-                                contentAlignment = Alignment.Center
-                            ) {
+                            Box(modifier = Modifier.size(80.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primary), contentAlignment = Alignment.Center) {
                                 Icon(Icons.Default.LibraryMusic, contentDescription = null, tint = Color.White, modifier = Modifier.size(44.dp))
                             }
-                        }
-                        // 2. Если есть картинка (плейлиста, альбома или артиста)
-                        else if (headerBitmap != null) {
-                            Image(
-                                bitmap = headerBitmap.asImageBitmap(),
-                                contentDescription = null,
-                                contentScale = ContentScale.Crop,
-                                // Фото артиста тоже будет стильно скругленным!
-                                modifier = Modifier.size(80.dp).clip(RoundedCornerShape(12.dp)).shadow(4.dp)
-                            )
-                        }
-                        // 3. Дефолтная заглушка (если это артист без фото - иконка человека, иначе - иконка альбома)
-                        else {
-                            Box(
-                                modifier = Modifier.size(80.dp).clip(RoundedCornerShape(12.dp)).background(Color.LightGray),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = if (isArtistTracks) Icons.Default.Person else Icons.Default.Album,
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(40.dp)
-                                )
+                        } else if (headerBitmap != null) {
+                            Image(bitmap = headerBitmap.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(80.dp).clip(RoundedCornerShape(12.dp)).shadow(4.dp))
+                        } else {
+                            Box(modifier = Modifier.size(80.dp).clip(RoundedCornerShape(12.dp)).background(Color.LightGray), contentAlignment = Alignment.Center) {
+                                Icon(imageVector = if (isArtistTracks) Icons.Default.Person else Icons.Default.Album, contentDescription = null, tint = Color.White, modifier = Modifier.size(40.dp))
                             }
                         }
 
@@ -894,7 +857,6 @@ fun FullScreenPlayer(
                     }
                 }
 
-                // СПИСОК ТРЕКОВ
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     itemsIndexed(currentQueue) { _, queueTrack ->
                         val isPlayingThis = (track.uri == queueTrack.uri)
@@ -908,25 +870,16 @@ fun FullScreenPlayer(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .background(if (isPlayingThis) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
-                                    .clickable {
-                                        viewModel.playTrack(queueTrack, currentQueue)
-                                        showQueue = false
-                                    }
+                                    .clickable { viewModel.playTrack(queueTrack, currentQueue); showQueue = false }
                                     .padding(horizontal = 16.dp, vertical = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 if (queueBitmap != null) {
-                                    Image(
-                                        bitmap = queueBitmap.asImageBitmap(),
-                                        contentDescription = null,
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))
-                                    )
+                                    Image(bitmap = queueBitmap.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)))
                                 } else {
-                                    Box(
-                                        modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(if (isPlayingThis) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
-                                        contentAlignment = Alignment.Center
-                                    ) { Icon(Icons.Default.MusicNote, contentDescription = null, tint = if (isPlayingThis) Color.White else MaterialTheme.colorScheme.primary) }
+                                    Box(modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(if (isPlayingThis) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)), contentAlignment = Alignment.Center) {
+                                        Icon(Icons.Default.MusicNote, contentDescription = null, tint = if (isPlayingThis) Color.White else MaterialTheme.colorScheme.primary)
+                                    }
                                 }
 
                                 Spacer(modifier = Modifier.width(16.dp))
@@ -953,7 +906,6 @@ fun FullScreenPlayer(
                                             )
                                         }
                                     }
-
                                     Text(
                                         text = queueTrack.artist ?: "Неизвестный исполнитель",
                                         fontSize = 14.sp,
@@ -964,12 +916,7 @@ fun FullScreenPlayer(
                                 }
 
                                 Spacer(modifier = Modifier.width(16.dp))
-
-                                Text(
-                                    text = viewModel.formatTrackDuration(queueTrack.durationMs),
-                                    fontSize = 14.sp,
-                                    color = if (isPlayingThis) MaterialTheme.colorScheme.primary else Color.Gray
-                                )
+                                Text(text = viewModel.formatTrackDuration(queueTrack.durationMs), fontSize = 14.sp, color = if (isPlayingThis) MaterialTheme.colorScheme.primary else Color.Gray)
                             }
                             HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), thickness = 1.dp, color = Color.LightGray.copy(alpha = 0.3f))
                         }
@@ -978,6 +925,145 @@ fun FullScreenPlayer(
                 }
             }
         }
+
+        // ==========================================
+        // БОКОВАЯ ШТОРКА ТЕКСТА ПЕСНИ (СИММЕТРИЧНО)
+        // ==========================================
+        AnimatedVisibility(
+            visible = showLyrics,
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.4f))
+                    .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { showLyrics = false }
+            )
+        }
+
+        AnimatedVisibility(
+            visible = showLyrics,
+            enter = slideInHorizontally(initialOffsetX = { fullWidth -> -fullWidth }), // Выезжает СЛЕВА
+            exit = slideOutHorizontally(targetOffsetX = { fullWidth -> -fullWidth }),
+            modifier = Modifier.align(Alignment.CenterStart) // ПРАВИЛЬНОЕ ПРИЖАТИЕ ВЛЕВО
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(0.85f)
+                    .shadow(16.dp)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .pointerInput(Unit) {
+                        detectHorizontalDragGestures { _, dragAmount ->
+                            if (dragAmount < -15f) { showLyrics = false } // Свайп влево, чтобы закрыть
+                        }
+                    }
+                    .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { }
+                    .statusBarsPadding()
+            ) {
+                // 1. ШАПКА ШТОРКИ
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Текст песни", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.weight(1f))
+                    IconButton(onClick = { showLyrics = false }) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Скрыть")
+                    }
+                }
+
+                // 2. ИНФОРМАЦИЯ О ПЕСНЕ
+                val lyricsCoverPath = viewModel.getAlbumCoverPath(track.artist, track.album)
+                val lyricsBitmap = remember(lyricsCoverPath) {
+                    lyricsCoverPath?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } }
+                }
+
+                Box(modifier = Modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.05f)).padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (lyricsBitmap != null) {
+                            Image(bitmap = lyricsBitmap.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(80.dp).clip(RoundedCornerShape(12.dp)).shadow(4.dp))
+                        } else {
+                            Box(modifier = Modifier.size(80.dp).clip(RoundedCornerShape(12.dp)).background(Color.LightGray), contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.MusicNote, contentDescription = null, tint = Color.White, modifier = Modifier.size(40.dp))
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Сейчас играет", fontSize = 14.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(text = track.title ?: track.fileName, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(text = track.artist ?: "Неизвестный", fontSize = 16.sp, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+
+                        IconButton(onClick = { showLyricsEditDialog = true }) {
+                            Icon(Icons.Default.Edit, contentDescription = "Редактировать", tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
+
+                // 3. САМ ТЕКСТ ИЛИ ЗАГЛУШКА
+                Box(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                    if (!track.lyrics.isNullOrBlank()) {
+                        Text(
+                            text = track.lyrics,
+                            fontSize = 14.sp, // <--- Уменьшили размер с 16.sp до 14.sp
+                            lineHeight = 22.sp, // <--- Скорректировали межстрочный интервал
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState()),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Start
+                        )
+                    } else {
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(Icons.Default.Subject, contentDescription = null, modifier = Modifier.size(64.dp), tint = Color.Gray.copy(alpha = 0.5f))
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text("Текста пока нет", color = Color.Gray, fontSize = 18.sp)
+                            Spacer(modifier = Modifier.height(16.dp))
+                            FilledTonalButton(onClick = { showLyricsEditDialog = true }) {
+                                Text("Добавить текст")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } // Конец главного Box() плеера
+
+    // ==========================================
+    // ДИАЛОГ РЕДАКТИРОВАНИЯ ТЕКСТА (ВНЕ ГЛАВНОГО ОКНА)
+    // ==========================================
+    if (showLyricsEditDialog) {
+        var lyricsText by remember { mutableStateOf(track.lyrics ?: "") }
+        AlertDialog(
+            onDismissRequest = { showLyricsEditDialog = false },
+            title = { Text("Текст песни", fontWeight = FontWeight.Bold) },
+            text = {
+                OutlinedTextField(
+                    value = lyricsText,
+                    onValueChange = { lyricsText = it },
+                    modifier = Modifier.fillMaxWidth().height(250.dp),
+                    placeholder = { Text("Вставь текст песни сюда...") }
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    viewModel.saveLyrics(track, lyricsText)
+                    showLyricsEditDialog = false
+                }) { Text("Сохранить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLyricsEditDialog = false }) { Text("Отмена") }
+            }
+        )
     }
 }
 
@@ -1009,7 +1095,6 @@ fun LibraryTabScreen(viewModel: MusicViewModel) {
 
     val currentArtist = remember(artists, openedArtistName) { artists.find { it.name == openedArtistName } }
     val currentAlbum = remember(currentArtist, openedAlbumTitle) {
-        // Ищем альбом и в основных релизах, и в фитах
         currentArtist?.albums?.find { it.title == openedAlbumTitle }
             ?: currentArtist?.appearances?.find { it.title == openedAlbumTitle }
     }
@@ -1017,22 +1102,34 @@ fun LibraryTabScreen(viewModel: MusicViewModel) {
     var searchQuery by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
 
+    // ЗАПОМИНАЕМ ПОСЛЕДНЕЕ СОСТОЯНИЕ ДЛЯ ПЛАВНОЙ АНИМАЦИИ ЗАКРЫТИЯ
+    val displayArtist = remember { mutableStateOf(currentArtist) }
+    if (currentArtist != null) displayArtist.value = currentArtist
+
+    val displayAlbum = remember { mutableStateOf(currentAlbum) }
+    if (currentAlbum != null) displayAlbum.value = currentAlbum
+
     // Системный "Назад" для поиска
-    BackHandler(enabled = isSearchActive) {
+    BackHandler(enabled = isSearchActive && currentArtist == null && currentAlbum == null) {
         isSearchActive = false
         searchQuery = ""
     }
 
-    if (currentAlbum != null) {
-        BackHandler { viewModel.openAlbum(null) }
-        AlbumScreen(album = currentAlbum, viewModel = viewModel, onClose = { viewModel.openAlbum(null) })
-    } else if (currentArtist != null) {
-        BackHandler { viewModel.openArtist(null) }
-        ArtistScreen(artist = currentArtist, viewModel = viewModel, onAlbumClick = { album -> viewModel.openAlbum(album.title) }, onClose = { viewModel.openArtist(null) })
-    } else {
-        Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+    // Системный "Назад" для артиста
+    BackHandler(enabled = currentArtist != null && currentAlbum == null) {
+        viewModel.openArtist(null)
+    }
 
-            // ИДЕАЛЬНОЕ ВЫРАВНИВАНИЕ ШАПКИ
+    // Системный "Назад" для альбома
+    BackHandler(enabled = currentAlbum != null) {
+        viewModel.openAlbum(null)
+    }
+
+    // ИСПОЛЬЗУЕМ BOX ДЛЯ НАСЛОЕНИЯ ЭКРАНОВ (чтобы нижние не удалялись из памяти)
+    Box(modifier = Modifier.fillMaxSize()) {
+
+        // 1. БАЗОВЫЙ ЭКРАН БИБЛИОТЕКИ (Всегда в самом низу)
+        Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1064,13 +1161,17 @@ fun LibraryTabScreen(viewModel: MusicViewModel) {
             } else {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     items(filteredArtists) { artist ->
-                        val bitmap = remember(artist.photoUri) { artist.photoUri?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } } }
                         Row(
                             modifier = Modifier.fillMaxWidth().clickable { viewModel.openArtist(artist.name) }.padding(16.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            if (bitmap != null) {
-                                androidx.compose.foundation.Image(bitmap = bitmap.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(56.dp).clip(CircleShape))
+                            if (artist.photoUri != null) {
+                                androidx.compose.foundation.Image(
+                                    painter = coil.compose.rememberAsyncImagePainter(java.io.File(artist.photoUri)),
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.size(56.dp).clip(CircleShape)
+                                )
                             } else {
                                 Box(modifier = Modifier.size(56.dp).clip(CircleShape).background(Color.LightGray), contentAlignment = Alignment.Center) { Icon(Icons.Default.Person, contentDescription = null, tint = Color.White) }
                             }
@@ -1082,6 +1183,32 @@ fun LibraryTabScreen(viewModel: MusicViewModel) {
                         }
                         HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = Color.LightGray.copy(alpha = 0.3f))
                     }
+                }
+            }
+        }
+
+        // 2. ЭКРАН АРТИСТА (Поверх библиотеки)
+        AnimatedVisibility(
+            visible = currentArtist != null,
+            enter = slideInHorizontally(initialOffsetX = { fullWidth -> fullWidth }),
+            exit = slideOutHorizontally(targetOffsetX = { fullWidth -> fullWidth })
+        ) {
+            displayArtist.value?.let { artist -> // <--- ИСПОЛЬЗУЕМ ЗАПОМНЕННОЕ
+                Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+                    ArtistScreen(artist = artist, viewModel = viewModel, onAlbumClick = { album -> viewModel.openAlbum(album.title) }, onClose = { viewModel.openArtist(null) })
+                }
+            }
+        }
+
+        // 3. ЭКРАН АЛЬБОМА (Поверх всего)
+        AnimatedVisibility(
+            visible = currentAlbum != null,
+            enter = slideInHorizontally(initialOffsetX = { fullWidth -> fullWidth }),
+            exit = slideOutHorizontally(targetOffsetX = { fullWidth -> fullWidth })
+        ) {
+            displayAlbum.value?.let { album -> // <--- ИСПОЛЬЗУЕМ ЗАПОМНЕННОЕ
+                Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+                    AlbumScreen(album = album, viewModel = viewModel, onClose = { viewModel.openAlbum(null) })
                 }
             }
         }
@@ -1430,10 +1557,14 @@ fun ArtistScreen(
     val currentTrack by viewModel.currentTrack.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
 
-    // --- НОВОЕ: Подтягиваем динамический топ из базы данных ---
-    val dynamicTracks by viewModel.getDynamicArtistTopTracks(artist.name).collectAsState(initial = emptyList())
-    // Если БД еще грузится или треков в истории нет, показываем дефолтные все треки
-    val finalTracks = if (dynamicTracks.isNotEmpty()) dynamicTracks else artist.allTracks
+    // Подтягиваем динамический топ из базы данных
+    val dynamicTracks by viewModel.getDynamicArtistTopTracks(artist.name).collectAsState(initial = artist.topTracks)
+
+    val finalTracks = remember(dynamicTracks, artist.allTracks) {
+        val historyUris = dynamicTracks.map { it.uri }
+        val missingTracks = artist.allTracks.filter { it.uri !in historyUris }
+        (dynamicTracks + missingTracks)
+    }
     // Обрезаем до 5, если не нажата кнопка "Все"
     val displayedTracks = if (showAllTracks) finalTracks else finalTracks.take(5)
 
@@ -1936,7 +2067,6 @@ fun TrackRowItem(
     trailingText: String? = null,
     onClick: () -> Unit
 ) {
-    val bitmap = remember(coverUri) { coverUri?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } } }
     val safeTitle = track.title?.takeIf { it.isNotBlank() } ?: track.fileName
     val safeArtist = track.artist?.takeIf { it.isNotBlank() } ?: "Неизвестный исполнитель"
 
@@ -1949,8 +2079,14 @@ fun TrackRowItem(
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (bitmap != null) {
-            androidx.compose.foundation.Image(bitmap = bitmap.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)))
+        // --- ИСПОЛЬЗУЕМ АСИНХРОННЫЙ COIL ДЛЯ ИДЕАЛЬНОЙ ПРОКРУТКИ ---
+        if (coverUri != null) {
+            androidx.compose.foundation.Image(
+                painter = coil.compose.rememberAsyncImagePainter(java.io.File(coverUri)),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp))
+            )
         } else {
             Box(modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)).background(if (isPlaying) MaterialTheme.colorScheme.primary else Color.LightGray), contentAlignment = Alignment.Center) { Icon(imageVector = Icons.Default.MusicNote, contentDescription = null, tint = Color.White) }
         }
@@ -1971,10 +2107,9 @@ fun TrackRowItem(
                 TrackBadge(isDemo = track.isDemo, isUnreleased = track.isUnreleased)
             }
             Spacer(modifier = Modifier.height(2.dp))
-            Text(text = safeArtist, fontSize = 14.sp, color = if (isPlaying) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(text = safeArtist, fontSize = 14.sp, color = if (isPlaying) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else Color.Gray, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
         }
 
-        // --- ВЫВОДИМ ЦИФРЫ ДЛЯ СТАТИСТИКИ ---
         if (trailingText != null) {
             Spacer(modifier = Modifier.width(8.dp))
             Text(text = trailingText, fontSize = 14.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
@@ -1984,12 +2119,6 @@ fun TrackRowItem(
 
 @Composable
 fun AlbumRowItem(album: Album, isPlayingContext: Boolean, onClick: () -> Unit, onPlayClick: () -> Unit) {
-    val bitmap = remember(album.coverUri) {
-        album.coverUri?.let { path ->
-            try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null }
-        }
-    }
-
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1997,18 +2126,16 @@ fun AlbumRowItem(album: Album, isPlayingContext: Boolean, onClick: () -> Unit, o
             .padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (bitmap != null) {
+        // --- ИСПОЛЬЗУЕМ АСИНХРОННЫЙ COIL ДЛЯ ИДЕАЛЬНОЙ ПРОКРУТКИ ---
+        if (album.coverUri != null) {
             androidx.compose.foundation.Image(
-                bitmap = bitmap.asImageBitmap(),
+                painter = coil.compose.rememberAsyncImagePainter(java.io.File(album.coverUri)),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp))
             )
         } else {
-            Box(
-                modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)).background(Color.DarkGray),
-                contentAlignment = Alignment.Center
-            ) { Icon(Icons.Default.Album, contentDescription = null, tint = Color.White) }
+            Box(modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)).background(Color.DarkGray), contentAlignment = Alignment.Center) { Icon(Icons.Default.Album, contentDescription = null, tint = Color.White) }
         }
 
         Spacer(modifier = Modifier.width(12.dp))
@@ -2016,19 +2143,12 @@ fun AlbumRowItem(album: Album, isPlayingContext: Boolean, onClick: () -> Unit, o
         Column(modifier = Modifier.weight(1f)) {
             Text(album.title, fontSize = 18.sp, fontWeight = FontWeight.Medium)
             val totalTracks = album.regularTracks.size + album.demoTracks.size + album.unreleasedTracks.size
-            val typeText = if (totalTracks == 1) "Сингл" else "$totalTracks треков"
-            Text("${album.year ?: "Год не указан"} • $typeText", fontSize = 14.sp, color = Color.Gray)
+            val albumType = if (album.title == "Синглы") "Сингл" else "Альбом"
+            Text("${album.year ?: "Год не указан"} • $albumType • $totalTracks треков", fontSize = 14.sp, color = Color.Gray)
         }
 
-        IconButton(
-            onClick = onPlayClick,
-            modifier = Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), CircleShape)
-        ) {
-            Icon(
-                imageVector = if (isPlayingContext) Icons.Default.Pause else Icons.Default.PlayArrow,
-                contentDescription = "Играть/Пауза",
-                tint = MaterialTheme.colorScheme.primary
-            )
+        IconButton(onClick = onPlayClick, modifier = Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), CircleShape)) {
+            Icon(imageVector = if (isPlayingContext) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = "Играть/Пауза", tint = MaterialTheme.colorScheme.primary)
         }
     }
 }
