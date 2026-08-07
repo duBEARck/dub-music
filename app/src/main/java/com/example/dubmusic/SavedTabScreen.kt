@@ -31,17 +31,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.filled.*
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.rememberAsyncImagePainter
-import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.zIndex
-import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlin.math.roundToInt
 
 @Composable
@@ -378,7 +375,7 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
                     LazyColumn(modifier = Modifier.fillMaxSize()) {
                         items(processedTracks, key = { it.uri }) { track ->
                             val isPlayingThis = currentTrack?.uri == track.uri
-                            val coverPath = viewModel.getAlbumCoverPath(track.artist, track.album)
+                            val coverPath = viewModel.getAlbumCoverPath(track)
 
                             Column {
                                 Row(
@@ -563,7 +560,7 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
 
                             itemsIndexed(localTracks, key = { _, track -> track.uri }) { index, track ->
                                 val isPlayingThis = currentTrack?.uri == track.uri
-                                val coverPath = viewModel.getAlbumCoverPath(track.artist, track.album)
+                                val coverPath = viewModel.getAlbumCoverPath(track)
 
                                 val isDragging = draggedIndex == index
                                 val elevation by androidx.compose.animation.core.animateDpAsState(if (isDragging) 12.dp else 0.dp)

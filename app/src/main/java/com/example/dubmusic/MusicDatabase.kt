@@ -94,7 +94,7 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE isProcessed = 0 AND isHidden = 0")
     fun getUnprocessedTracks(): Flow<List<TrackEntity>>
 
-    @Query("SELECT * FROM tracks WHERE isProcessed = 1")
+    @Query("SELECT * FROM tracks WHERE isProcessed = 1 ORDER BY dateAdded DESC")
     fun getAllProcessedTracks(): Flow<List<TrackEntity>>
 
     @Query("SELECT * FROM tracks WHERE isHidden = 1")

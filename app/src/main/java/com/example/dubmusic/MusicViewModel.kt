@@ -6,21 +6,14 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.Dispatchers // Убедись, что этот импорт есть
-import kotlinx.coroutines.launch
-import android.media.MediaPlayer
+import kotlinx.coroutines.Dispatchers
 import android.net.Uri
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
-import android.media.MediaMetadataRetriever
 import kotlinx.coroutines.flow.first
-import android.media.session.MediaSession
-import android.media.session.PlaybackState
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
@@ -634,6 +627,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     else -> "Моя музыка"
                 }
             }
+
+            // ---> ДОБАВЛЕНО: Отправляем очередь на хранение в бессмертный Сервис
+            musicService?.savedQueue = currentQueue
+            musicService?.savedQueueTitle = _currentQueueTitle.value
+
         } else {
             currentQueueIndex = currentQueue.indexOf(track)
         }
@@ -765,7 +763,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 if (_isPlaying.value) {
                     val current = musicService?.getCurrentPosition() ?: 0
                     val total = musicService?.getDuration() ?: 1
-                    _progress.value = if (total > 0) current.toFloat() / total else 0f
+
+                    // ФИКС: Ограничиваем прогресс, чтобы он никогда не превышал 100%
+                    _progress.value = if (total > 0) (current.toFloat() / total).coerceIn(0f, 1f) else 0f
                     _currentTime.value = formatTime(current)
                 }
                 kotlinx.coroutines.delay(1000)
@@ -823,15 +823,49 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // 2. ИСПРАВЛЕННАЯ СИНХРОНИЗАЦИЯ С СЕРВИСОМ
     fun syncWithService() {
         val service = musicService ?: return
-
-        // Берем 100% готовый трек прямо из памяти Сервиса!
         val track = service.currentTrackItem ?: return
 
         _currentTrack.value = track
         _isPlaying.value = service.isPlaying()
-        _totalTime.value = formatTime(service.getDuration())
+
+        // ФИКС 1: Тянем ПОЛНУЮ очередь прямо из выжившего Сервиса!
+        if (currentQueue.isEmpty()) {
+            if (service.savedQueue.isNotEmpty()) {
+                currentQueue = service.savedQueue
+                _currentQueueFlow.value = currentQueue
+                _currentQueueTitle.value = service.savedQueueTitle
+                currentQueueIndex = currentQueue.indexOf(track)
+            } else {
+                currentQueue = listOf(track)
+                currentQueueIndex = 0
+                _currentQueueFlow.value = currentQueue
+            }
+        }
+
+        val duration = service.getDuration()
+        val currentPos = service.getCurrentPosition()
+
+        _totalTime.value = formatTime(duration)
+        _currentTime.value = formatTime(currentPos)
+
+        // ФИКС 2: Жестко держим прогресс в рамках от 0.0 до 1.0
+        _progress.value = if (duration > 0) {
+            (currentPos.toFloat() / duration).coerceIn(0f, 1f)
+        } else 0f
+
+        service.onTrackCompletion = {
+            if (_playbackMode.value == PlaybackMode.NORMAL && currentQueueIndex >= currentQueue.size - 1) {
+                _isPlaying.value = false
+                _progress.value = 0f
+                _currentTime.value = "0:00"
+                progressJob?.cancel()
+            } else {
+                playNext(isAutomatic = true)
+            }
+        }
 
         if (_isPlaying.value) {
             startProgressUpdate()
@@ -858,14 +892,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         groupedByPrimaryArtist.forEach { (primaryArtistName, artistTracks) ->
-            // Все треки, у которых поле album пустое (null), собираются в папку "Синглы"
-            val groupedByAlbum = artistTracks.groupBy { it.album ?: "Синглы" }
+
+            // ИСПРАВЛЕНИЕ 1: Если альбома нет, группируем по названию трека (это будет Сингл)
+            val groupedByAlbum = artistTracks.groupBy { track ->
+                if (track.album.isNullOrBlank()) track.title ?: track.fileName else track.album
+            }
 
             groupedByAlbum.forEach { (albumTitle, albumTracks) ->
                 val releaseYear = albumTracks.firstNotNullOfOrNull { it.year }
                 val regular = albumTracks.filter { !it.isDemo && !it.isUnreleased }
                 val demos = albumTracks.filter { it.isDemo }
                 val unreleased = albumTracks.filter { it.isUnreleased }
+
+                // Проверяем, действительно ли это сингл (нет названия альбома у исходных треков)
+                val isSingleItem = albumTracks.all { it.album.isNullOrBlank() }
+
                 val albumPhotoKey = "album_photo_${primaryArtistName}_${albumTitle}"
 
                 val album = Album(
@@ -877,40 +918,55 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     demoTracks = demos,
                     unreleasedTracks = unreleased,
                     hasDemosEnabled = demos.isNotEmpty(),
-                    hasUnreleasedEnabled = unreleased.isNotEmpty()
+                    hasUnreleasedEnabled = unreleased.isNotEmpty(),
+                    isSingle = isSingleItem // Флаг сингла
                 )
 
-                // Добавляем альбом в ОСНОВНЫЕ релизы главного артиста
                 val pArtistData = artistDataMap.getOrPut(primaryArtistName) { ArtistData() }
                 pArtistData.albums.add(album)
                 pArtistData.allTracks.addAll(albumTracks)
 
-                // 3. ИЩЕМ ФИТЫ: пробегаемся по трекам и смотрим, есть ли гости
+                // ИЩЕМ ФИТЫ: пробегаемся по трекам и смотрим, есть ли гости
                 albumTracks.forEach { track ->
                     val trackArtists = track.artist?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() } ?: emptyList()
                     if (trackArtists.size > 1) {
-                        // Раскидываем этот альбом всем остальным гостям в "Участия"
                         trackArtists.drop(1).forEach { guestName ->
                             val gArtistData = artistDataMap.getOrPut(guestName) { ArtistData() }
                             gArtistData.appearances.add(album)
-                            gArtistData.allTracks.add(track) // Даем гостю возможность играть этот трек из своего профиля
+                            gArtistData.allTracks.add(track)
                         }
                     }
                 }
             }
         }
 
-        // 4. Упаковываем всё обратно в красивый список
+        // 4. Упаковываем всё обратно и применяем КАСТОМНУЮ СОРТИРОВКУ АЛЬБОМОВ
         val newArtistsList = artistDataMap.map { (artistName, data) ->
+
+            // ИСПРАВЛЕНИЕ 2: Читаем сохраненный порядок альбомов из памяти
+            val savedOrderStr = prefs.getString("album_order_$artistName", null)
+            val savedOrder = savedOrderStr?.split("<|>") ?: emptyList()
+
+            // Сортируем: сначала по сохраненному порядку, если его нет - по году
+            val sortedAlbums = data.albums.distinctBy { it.title }.sortedWith { a1, a2 ->
+                val idx1 = savedOrder.indexOf(a1.title)
+                val idx2 = savedOrder.indexOf(a2.title)
+
+                if (idx1 != -1 && idx2 != -1) idx1.compareTo(idx2)
+                else if (idx1 != -1) -1
+                else if (idx2 != -1) 1
+                else (a1.year ?: 0).compareTo(a2.year ?: 0)
+            }
+
             Artist(
                 name = artistName,
                 photoUri = prefs.getString(artistName, null),
-                albums = data.albums.distinctBy { it.title }.sortedBy { it.year ?: 0 },
+                albums = sortedAlbums,
                 appearances = data.appearances.toList().distinctBy { it.title }.sortedBy { it.year ?: 0 },
                 topTracks = data.allTracks.toList().take(5),
                 allTracks = data.allTracks.toList()
             )
-        }.sortedByDescending { it.allTracks.size } // <--- СОРТИРУЕМ ПО КОЛИЧЕСТВУ ТРЕКОВ
+        }.sortedByDescending { it.allTracks.size }
 
         _artistsList.value = newArtistsList
     }
@@ -943,6 +999,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // Сохраняем ручной порядок альбомов для конкретного артиста
+    fun updateArtistAlbumOrder(artistName: String, orderedAlbumTitles: List<String>) {
+        prefs.edit().putString("album_order_$artistName", orderedAlbumTitles.joinToString("<|>")).apply()
+        buildLibrary(cachedTracks) // Пересобираем библиотеку для обновления UI
+    }
+
     fun updateAlbumDetails(album: Album, newYear: Int?, orderedUris: List<String>) {
         viewModelScope.launch(Dispatchers.IO) {
             // Просто обновляем порядок треков и год (статусы Demo/Unreleased остаются как были)
@@ -955,10 +1017,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Получить путь к обложке альбома по имени артиста (учитывая фиты!)
+    // УМНЫЙ ПОИСК ОБЛОЖКИ (Сам понимает, сингл это или альбом)
+    fun getAlbumCoverPath(track: TrackEntity?): String? {
+        if (track == null) return null
+        // Если альбома нет, ищем по названию трека
+        val effectiveAlbum = if (track.album.isNullOrBlank()) (track.title ?: track.fileName) else track.album
+        return getAlbumCoverPath(track.artist, effectiveAlbum)
+    }
+
     fun getAlbumCoverPath(artistName: String?, albumTitle: String?): String? {
         if (artistName.isNullOrBlank() || albumTitle.isNullOrBlank()) return null
-        // Берем только ГЛАВНОГО артиста (первого до запятой), так как обложка привязана к нему
         val primaryArtist = artistName.split(",").map { it.trim() }.firstOrNull { it.isNotBlank() } ?: "Неизвестный исполнитель"
         val albumPhotoKey = "album_photo_${primaryArtist}_${albumTitle}"
         return prefs.getString(albumPhotoKey, null)

@@ -12,7 +12,6 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import android.media.MediaPlayer
 import android.net.Uri
-import androidx.media.app.NotificationCompat.MediaStyle
 import android.app.PendingIntent
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.MediaMetadataCompat
@@ -65,6 +64,10 @@ class MusicService : Service() {
     // Добавим переменную, чтобы Сервис запоминал, какая песня сейчас играет
     var currentTrackItem: TrackEntity? = null
 
+    // --- СОХРАНЯЕМ ОЧЕРЕДЬ В СЕРВИСЕ ---
+    var savedQueue: List<TrackEntity> = emptyList()
+    var savedQueueTitle: String = "Очередь"
+
     override fun onDestroy() {
         super.onDestroy()
         mediaPlayer?.release()
@@ -108,16 +111,20 @@ class MusicService : Service() {
     }
 
     // Эта функция будет менять песню и кнопки в шторке
+    // Эта функция будет менять песню и кнопки в шторке
     fun updateNotification(title: String, artist: String, isPlaying: Boolean) {
         val track = currentTrackItem
         var albumBitmap: Bitmap? = null
 
-        if (track != null && !track.artist.isNullOrBlank() && !track.album.isNullOrBlank()) {
+        // ИСПРАВЛЕНИЕ 1: Убрали жесткую проверку !track.album.isNullOrBlank()
+        if (track != null && !track.artist.isNullOrBlank()) {
 
-            // --- ИСПРАВЛЕНИЕ: Отсекаем гостей для поиска картинки ---
+            // Отсекаем гостей для поиска картинки
             val primaryArtist = track.artist.split(",").map { it.trim() }.firstOrNull { it.isNotBlank() } ?: track.artist
-            val albumPhotoKey = "album_photo_${primaryArtist}_${track.album}"
-            // ---------------------------------------------------------
+
+            // Если альбома нет (сингл), ищем по названию трека
+            val effectiveAlbum = if (track.album.isNullOrBlank()) (track.title ?: track.fileName) else track.album
+            val albumPhotoKey = "album_photo_${primaryArtist}_${effectiveAlbum}"
 
             val prefs = getSharedPreferences("artist_photos", Context.MODE_PRIVATE)
             val coverPath = prefs.getString(albumPhotoKey, null)
@@ -126,7 +133,6 @@ class MusicService : Service() {
                 try {
                     val originalBitmap = BitmapFactory.decodeFile(coverPath)
                     if (originalBitmap != null) {
-                        // --- ИДЕАЛЬНОЕ КАЧЕСТВО ДЛЯ ШТОРКИ (Твой код) ---
                         val size = Math.min(originalBitmap.width, originalBitmap.height)
                         val x = (originalBitmap.width - size) / 2
                         val y = (originalBitmap.height - size) / 2
@@ -139,8 +145,6 @@ class MusicService : Service() {
                 }
             }
         }
-
-        // ... ДАЛЬШЕ ВЕСЬ ТВОЙ КОД БЕЗ ИЗМЕНЕНИЙ (val duration = ...) ...
 
         val duration = mediaPlayer?.duration?.toLong() ?: 0L
         val position = mediaPlayer?.currentPosition?.toLong() ?: 0L

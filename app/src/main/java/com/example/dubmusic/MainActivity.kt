@@ -26,7 +26,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.IntOffset
@@ -44,31 +43,22 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.zIndex
@@ -82,7 +72,8 @@ data class Album(
     val demoTracks: List<TrackEntity>,
     val unreleasedTracks: List<TrackEntity>,
     var hasDemosEnabled: Boolean = false,
-    var hasUnreleasedEnabled: Boolean = false
+    var hasUnreleasedEnabled: Boolean = false,
+    val isSingle: Boolean = false // <--- НОВОЕ ПОЛЕ: указывает, что это сингл
 )
 
 data class Artist(
@@ -317,7 +308,7 @@ fun BottomPlayerBar(
     onNext: () -> Unit,
     onOpenFullScreen: () -> Unit
 ) {
-    val coverPath = viewModel.getAlbumCoverPath(track.artist, track.album)
+    val coverPath = viewModel.getAlbumCoverPath(track)
     val bitmap = remember(coverPath) {
         coverPath?.let { path ->
             try {
@@ -409,14 +400,22 @@ fun BottomPlayerBar(
                 )
             }
         }
-        LinearProgressIndicator(
-            progress = { progress },
+
+        // СВОЙ КАСТОМНЫЙ ПРОГРЕСС-БАР: Никаких точек и упрямого Material 3
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(2.dp),
-            color = MaterialTheme.colorScheme.primary,
-            trackColor = Color.Transparent
-        )
+                .height(2.dp)
+                .background(Color.Transparent)
+        ) {
+            Box(
+                modifier = Modifier
+                    // Ширина этого блока зависит от прогресса (от 0.0 до 1.0)
+                    .fillMaxWidth(progress.coerceIn(0f, 1f))
+                    .fillMaxHeight()
+                    .background(MaterialTheme.colorScheme.primary)
+            )
+        }
     }
 }
 
@@ -562,7 +561,7 @@ fun FullScreenPlayer(
                 if (currentQueue.isEmpty()) return@HorizontalPager
 
                 val pageTrack = currentQueue[page]
-                val pageCoverPath = viewModel.getAlbumCoverPath(pageTrack.artist, pageTrack.album)
+                val pageCoverPath = viewModel.getAlbumCoverPath(pageTrack)
                 val pageBitmap = remember(pageCoverPath) {
                     pageCoverPath?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } }
                 }
@@ -702,10 +701,22 @@ fun FullScreenPlayer(
                     Text(text = totalTime, fontSize = 12.sp, color = Color.Gray)
                 }
                 Slider(
-                    value = progress,
+                    value = progress.coerceIn(0f, 1f),
                     onValueChange = onSeek,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
-                    colors = SliderDefaults.colors(thumbColor = MaterialTheme.colorScheme.primary, activeTrackColor = MaterialTheme.colorScheme.primary)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp),
+                    colors = SliderDefaults.colors(
+                        thumbColor = MaterialTheme.colorScheme.primary,
+                        activeTrackColor = MaterialTheme.colorScheme.primary,
+                        inactiveTrackColor = Color.LightGray.copy(alpha = 0.4f)
+                    ),
+                    track = { sliderState ->
+                        SliderDefaults.Track(
+                            sliderState = sliderState,
+                            drawStopIndicator = null // Убираем фиолетовую точку в конце полосы
+                        )
+                    }
                 )
             }
 
@@ -823,7 +834,7 @@ fun FullScreenPlayer(
                         artists.find { it.name == artistName }?.photoUri
                     } else null
                 }
-                val headerCoverPath = matchedPlaylist?.imageUri ?: if (!isAllDownloaded && !isArtistTracks) viewModel.getAlbumCoverPath(track.artist, track.album) else null
+                val headerCoverPath = matchedPlaylist?.imageUri ?: if (!isAllDownloaded && !isArtistTracks) viewModel.getAlbumCoverPath(track) else null
                 val headerBitmap = remember(headerCoverPath, headerArtistPhotoUri) {
                     val finalPath = headerArtistPhotoUri ?: headerCoverPath
                     finalPath?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } }
@@ -860,7 +871,7 @@ fun FullScreenPlayer(
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     itemsIndexed(currentQueue) { _, queueTrack ->
                         val isPlayingThis = (track.uri == queueTrack.uri)
-                        val queueCoverPath = viewModel.getAlbumCoverPath(queueTrack.artist, queueTrack.album)
+                        val queueCoverPath = viewModel.getAlbumCoverPath(queueTrack)
                         val queueBitmap = remember(queueCoverPath) {
                             queueCoverPath?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } }
                         }
@@ -975,7 +986,7 @@ fun FullScreenPlayer(
                 }
 
                 // 2. ИНФОРМАЦИЯ О ПЕСНЕ
-                val lyricsCoverPath = viewModel.getAlbumCoverPath(track.artist, track.album)
+                val lyricsCoverPath = viewModel.getAlbumCoverPath(track)
                 val lyricsBitmap = remember(lyricsCoverPath) {
                     lyricsCoverPath?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } }
                 }
@@ -1323,7 +1334,7 @@ fun RealStatsScreen(viewModel: MusicViewModel, onNavigateToLibrary: () -> Unit) 
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("#${index + 1}", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Color.Gray, modifier = Modifier.width(30.dp))
                             Box(modifier = Modifier.weight(1f)) {
-                                TrackRowItem(track = trackStat.track, coverUri = viewModel.getAlbumCoverPath(trackStat.track.artist, trackStat.track.album), isPlaying = false, trailingText = statText) {
+                                TrackRowItem(track = trackStat.track, coverUri = viewModel.getAlbumCoverPath(trackStat.track), isPlaying = false, trailingText = statText) {
                                     viewModel.playTrack(trackStat.track, currentTopTracks.map { it.track }, forcedTitle = "Топ треков: ${periodNames[currentPeriod.ordinal]}")
                                 }
                             }
@@ -1554,36 +1565,38 @@ fun ArtistScreen(
 ) {
     var showAllTracks by remember { mutableStateOf(false) }
 
+    // ДОБАВЛЕНО: Стейты для сортировки
+    var isReorderingAlbums by remember { mutableStateOf(false) }
+    val editableAlbums = remember { mutableStateListOf(*artist.albums.toTypedArray()) }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+
+    // Синхронизируем список при изменениях, если мы не в режиме редактирования
+    LaunchedEffect(artist.albums) {
+        if (!isReorderingAlbums) {
+            editableAlbums.clear()
+            editableAlbums.addAll(artist.albums)
+        }
+    }
+
     val currentTrack by viewModel.currentTrack.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
-
-    // Подтягиваем динамический топ из базы данных
     val dynamicTracks by viewModel.getDynamicArtistTopTracks(artist.name).collectAsState(initial = artist.topTracks)
+
+    val currentQueueTitle by viewModel.currentQueueTitle.collectAsState()
 
     val finalTracks = remember(dynamicTracks, artist.allTracks) {
         val historyUris = dynamicTracks.map { it.uri }
         val missingTracks = artist.allTracks.filter { it.uri !in historyUris }
         (dynamicTracks + missingTracks)
     }
-    // Обрезаем до 5, если не нажата кнопка "Все"
     val displayedTracks = if (showAllTracks) finalTracks else finalTracks.take(5)
 
-    val photoPickerLauncher =
-        rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-            uri?.let { viewModel.setArtistPhoto(artist.name, it) }
-        }
-
-    val bitmap = remember(artist.photoUri) {
-        artist.photoUri?.let { path ->
-            try {
-                android.graphics.BitmapFactory.decodeFile(path)
-            } catch (e: Exception) {
-                null
-            }
-        }
+    val photoPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        uri?.let { viewModel.setArtistPhoto(artist.name, it) }
     }
+    val bitmap = remember(artist.photoUri) { artist.photoUri?.let { path -> try { android.graphics.BitmapFactory.decodeFile(path) } catch (e: Exception) { null } } }
 
-    LazyColumn(modifier = Modifier.fillMaxSize()) {
+    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
         item {
             Box(modifier = Modifier
                 .fillMaxWidth()
@@ -1715,7 +1728,7 @@ fun ArtistScreen(
 
         itemsIndexed(displayedTracks) { index, track ->
             // Ищем обложку глобально через ViewModel (теперь фиты работают)
-            val trackCoverUri = viewModel.getAlbumCoverPath(track.artist, track.album)
+            val trackCoverUri = viewModel.getAlbumCoverPath(track)
             val isPlayingTrack = (currentTrack?.uri == track.uri)
 
             Column(modifier = Modifier.padding(horizontal = 16.dp)) {
@@ -1723,7 +1736,7 @@ fun ArtistScreen(
                     // ИСПРАВЛЕНИЕ 2: Передаем forcedTitle
                     viewModel.playTrack(
                         track = track,
-                        playlist = artist.allTracks,
+                        playlist = finalTracks,
                         forcedTitle = "Треки: ${artist.name}"
                     )
                 }
@@ -1737,33 +1750,65 @@ fun ArtistScreen(
         if (!showAllTracks) {
             item {
                 Spacer(modifier = Modifier.height(24.dp))
-                Text(
-                    text = "Альбомы",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Альбомы",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    // ДОБАВЛЕНО: Кнопка режима сортировки
+                    if (artist.albums.size > 1) {
+                        IconButton(onClick = {
+                            if (isReorderingAlbums) {
+                                // При выключении сохраняем новый порядок
+                                viewModel.updateArtistAlbumOrder(artist.name, editableAlbums.map { it.title })
+                            }
+                            isReorderingAlbums = !isReorderingAlbums
+                        }) {
+                            Icon(
+                                imageVector = if (isReorderingAlbums) Icons.Default.Check else Icons.Default.SwapVert,
+                                contentDescription = "Изменить порядок",
+                                tint = if (isReorderingAlbums) MaterialTheme.colorScheme.primary else Color.Gray
+                            )
+                        }
+                    }
+                }
                 Spacer(modifier = Modifier.height(8.dp))
             }
-            itemsIndexed(artist.albums) { index, album ->
-                val isThisAlbumContext = currentTrack?.album == album.title
 
-                Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                    AlbumRowItem(
+            // ИСПРАВЛЕНИЕ: Используем editableAlbums и AlbumDraggableRow
+            itemsIndexed(editableAlbums, key = { _, album -> album.title }) { index, album ->
+                val isThisAlbumContext = (currentQueueTitle == album.title)
+
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    AlbumDraggableRow(
                         album = album,
+                        isReordering = isReorderingAlbums,
+                        currentList = editableAlbums,
+                        listState = listState,
                         isPlayingContext = isThisAlbumContext && isPlaying,
-                        onClick = { onAlbumClick(album) },
+                        onClick = { if (!isReorderingAlbums) onAlbumClick(album) },
                         onPlayClick = {
                             if (isThisAlbumContext) {
                                 viewModel.togglePlayback()
                             } else {
                                 val allTracks = (album.regularTracks + album.demoTracks + album.unreleasedTracks).sortedBy { it.albumOrder }
-                                if (allTracks.isNotEmpty()) viewModel.playTrack(allTracks.first(), allTracks)
+                                if (allTracks.isNotEmpty()) {
+                                    // Передаем forcedTitle, чтобы плеер знал, что играет именно этот релиз
+                                    viewModel.playTrack(
+                                        track = allTracks.first(),
+                                        playlist = allTracks,
+                                        forcedTitle = album.title
+                                    )
+                                }
                             }
                         }
                     )
-                    // ВОЗВРАЩАЕМ РАЗДЕЛИТЕЛЬ ДЛЯ АЛЬБОМОВ
-                    if (index < artist.albums.lastIndex) {
+                    if (index < editableAlbums.lastIndex && !isReorderingAlbums) {
                         HorizontalDivider(modifier = Modifier.padding(start = 76.dp), color = Color.LightGray.copy(alpha = 0.3f))
                     }
                 }
@@ -1782,7 +1827,7 @@ fun ArtistScreen(
                     Spacer(modifier = Modifier.height(8.dp))
                 }
                 itemsIndexed(artist.appearances) { index, album ->
-                    val isThisAlbumContext = currentTrack?.album == album.title
+                    val isThisAlbumContext = (currentQueueTitle == album.title)
 
                     Column(modifier = Modifier.padding(horizontal = 16.dp)) {
                         AlbumRowItem(
@@ -1794,7 +1839,13 @@ fun ArtistScreen(
                                     viewModel.togglePlayback()
                                 } else {
                                     val allTracks = (album.regularTracks + album.demoTracks + album.unreleasedTracks).sortedBy { it.albumOrder }
-                                    if (allTracks.isNotEmpty()) viewModel.playTrack(allTracks.first(), allTracks)
+                                    if (allTracks.isNotEmpty()) {
+                                        viewModel.playTrack(
+                                            track = allTracks.first(),
+                                            playlist = allTracks,
+                                            forcedTitle = album.title
+                                        )
+                                    }
                                 }
                             }
                         )
@@ -1819,7 +1870,8 @@ fun AlbumScreen(
     var showEditDialog by remember { mutableStateOf(false) }
     val currentTrack by viewModel.currentTrack.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
-    val isThisAlbumContext = currentTrack?.album == album.title
+    val currentQueueTitle by viewModel.currentQueueTitle.collectAsState()
+    val isThisAlbumContext = (currentQueueTitle == album.title)
 
     val photoPickerLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -1949,13 +2001,16 @@ fun AlbumScreen(
 
                         Spacer(modifier = Modifier.width(12.dp))
 
-                        // === ВОТ ТА САМАЯ УМНАЯ КНОПКА PLAY/PAUSE ===
                         IconButton(
                             onClick = {
                                 if (isThisAlbumContext) {
                                     viewModel.togglePlayback()
                                 } else if (allAlbumTracksSorted.isNotEmpty()) {
-                                    viewModel.playTrack(allAlbumTracksSorted.first(), allAlbumTracksSorted)
+                                    viewModel.playTrack(
+                                        track = allAlbumTracksSorted.first(),
+                                        playlist = allAlbumTracksSorted,
+                                        forcedTitle = album.title
+                                    )
                                 }
                             },
                             modifier = Modifier
@@ -1983,10 +2038,7 @@ fun AlbumScreen(
             val isPlayingTrack = (currentTrack?.uri == track.uri)
             Box(modifier = Modifier.padding(horizontal = 16.dp)) {
                 TrackRowItem(track = track, coverUri = album.coverUri, isPlaying = isPlayingTrack) {
-                    viewModel.playTrack(
-                        track,
-                        allAlbumTracksSorted
-                    ) // Передаем отсортированную очередь!
+                    viewModel.playTrack(track, allAlbumTracksSorted, forcedTitle = album.title)
                 }
             }
         }
@@ -2017,7 +2069,7 @@ fun AlbumScreen(
                 val isPlayingTrack = (currentTrack?.uri == track.uri)
                 Box(modifier = Modifier.padding(horizontal = 16.dp)) {
                     TrackRowItem(track = track, coverUri = album.coverUri, isPlaying = isPlayingTrack) {
-                        viewModel.playTrack(track, allAlbumTracksSorted)
+                        viewModel.playTrack(track, allAlbumTracksSorted, forcedTitle = album.title)
                     }
                 }
             }
@@ -2049,13 +2101,11 @@ fun AlbumScreen(
                 val isPlayingTrack = (currentTrack?.uri == track.uri)
                 Box(modifier = Modifier.padding(horizontal = 16.dp)) {
                     TrackRowItem(track = track, coverUri = album.coverUri, isPlaying = isPlayingTrack) {
-                        viewModel.playTrack(track, allAlbumTracksSorted)
+                        viewModel.playTrack(track, allAlbumTracksSorted, forcedTitle = album.title)
                     }
                 }
             }
         }
-
-        item { Spacer(modifier = Modifier.height(100.dp)) }
     }
 }
 
@@ -2126,7 +2176,6 @@ fun AlbumRowItem(album: Album, isPlayingContext: Boolean, onClick: () -> Unit, o
             .padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // --- ИСПОЛЬЗУЕМ АСИНХРОННЫЙ COIL ДЛЯ ИДЕАЛЬНОЙ ПРОКРУТКИ ---
         if (album.coverUri != null) {
             androidx.compose.foundation.Image(
                 painter = coil.compose.rememberAsyncImagePainter(java.io.File(album.coverUri)),
@@ -2142,13 +2191,128 @@ fun AlbumRowItem(album: Album, isPlayingContext: Boolean, onClick: () -> Unit, o
 
         Column(modifier = Modifier.weight(1f)) {
             Text(album.title, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+
+            // ИСПРАВЛЕНИЕ: Прячем количество треков у синглов
             val totalTracks = album.regularTracks.size + album.demoTracks.size + album.unreleasedTracks.size
-            val albumType = if (album.title == "Синглы") "Сингл" else "Альбом"
-            Text("${album.year ?: "Год не указан"} • $albumType • $totalTracks треков", fontSize = 14.sp, color = Color.Gray)
+            val albumType = if (album.isSingle) "Сингл" else "Альбом"
+            val tracksText = if (album.isSingle) "" else " • $totalTracks треков"
+
+            Text("${album.year ?: "Год не указан"} • $albumType$tracksText", fontSize = 14.sp, color = Color.Gray)
         }
 
         IconButton(onClick = onPlayClick, modifier = Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), CircleShape)) {
             Icon(imageVector = if (isPlayingContext) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = "Играть/Пауза", tint = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+@Composable
+fun AlbumDraggableRow(
+    album: Album,
+    isReordering: Boolean,
+    currentList: MutableList<Album>,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    isPlayingContext: Boolean,
+    onClick: () -> Unit,
+    onPlayClick: () -> Unit
+) {
+    var isDragging by remember { mutableStateOf(false) }
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+    var currentIndex by remember { mutableIntStateOf(-1) }
+    var itemHeightPx by remember { mutableFloatStateOf(120f) }
+
+    val elevation by androidx.compose.animation.core.animateDpAsState(if (isDragging) 12.dp else 0.dp)
+    val scale by androidx.compose.animation.core.animateFloatAsState(if (isDragging) 1.05f else 1f)
+
+    fun checkAndSwap() {
+        val threshold = itemHeightPx / 2
+        if (dragOffsetY > threshold && currentIndex < currentList.lastIndex) {
+            val movedItem = currentList.removeAt(currentIndex)
+            currentList.add(currentIndex + 1, movedItem)
+            currentIndex++
+            dragOffsetY -= itemHeightPx
+        } else if (dragOffsetY < -threshold && currentIndex > 0) {
+            val movedItem = currentList.removeAt(currentIndex)
+            currentList.add(currentIndex - 1, movedItem)
+            currentIndex--
+            dragOffsetY += itemHeightPx
+        }
+    }
+
+    LaunchedEffect(isDragging) {
+        while (isDragging) {
+            val itemInfo = listState.layoutInfo.visibleItemsInfo.find { it.key == album.title }
+            if (itemInfo != null) {
+                val currentY = itemInfo.offset.toFloat() + dragOffsetY
+                val viewportHeight = listState.layoutInfo.viewportSize.height.toFloat()
+
+                val scrollSpeed = when {
+                    viewportHeight < 300f -> 0f
+                    currentY < 100f -> -15f
+                    currentY > viewportHeight - 150f -> 15f
+                    else -> 0f
+                }
+                if (scrollSpeed != 0f) {
+                    val consumed = listState.scrollBy(scrollSpeed)
+                    dragOffsetY += consumed
+                    if (consumed != 0f) {
+                        checkAndSwap()
+                    }
+                }
+            }
+            kotlinx.coroutines.delay(16)
+        }
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .onGloballyPositioned { itemHeightPx = it.size.height.toFloat() }
+            .zIndex(if (isDragging) 1f else 0f)
+            .graphicsLayer {
+                translationY = dragOffsetY
+                scaleX = scale
+                scaleY = scale
+            }
+            .shadow(elevation, RoundedCornerShape(8.dp))
+            .background(if (isDragging) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent, RoundedCornerShape(8.dp))
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (isReordering) {
+            Icon(
+                Icons.Default.DragHandle,
+                contentDescription = "Перетащить",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .padding(end = 12.dp)
+                    .size(28.dp)
+                    .pointerInput(currentList) {
+                        detectVerticalDragGestures(
+                            onDragStart = {
+                                isDragging = true
+                                currentIndex = currentList.indexOf(album)
+                                dragOffsetY = 0f
+                            },
+                            onDragEnd = { isDragging = false; dragOffsetY = 0f },
+                            onDragCancel = { isDragging = false; dragOffsetY = 0f },
+                            onVerticalDrag = { change, dragAmount ->
+                                change.consume()
+                                dragOffsetY += dragAmount
+                                checkAndSwap()
+                            }
+                        )
+                    }
+            )
+        }
+
+        Box(modifier = Modifier.weight(1f)) {
+            AlbumRowItem(
+                album = album,
+                isPlayingContext = isPlayingContext,
+                onClick = onClick,
+                onPlayClick = onPlayClick
+            )
         }
     }
 }
