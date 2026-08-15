@@ -479,28 +479,29 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
                     var draggedIndex by remember { mutableIntStateOf(-1) }
                     var dragOffsetY by remember { mutableFloatStateOf(0f) }
                     var itemHeightPx by remember { mutableFloatStateOf(200f) }
-                    val currentIndex = if (draggedIndex != -1 && itemHeightPx > 0) {
-                        (draggedIndex + (dragOffsetY / itemHeightPx).roundToInt()).coerceIn(0, localTracks.lastIndex)
-                    } else -1
 
                     fun checkAndSwap() {
-                        val threshold = itemHeightPx / 2
-                        if (dragOffsetY > threshold && currentIndex < localTracks.lastIndex) {
-                            val movedTrack = localTracks.removeAt(currentIndex)
-                            localTracks.add(currentIndex + 1, movedTrack)
-                            viewModel.moveTrackInPlaylist(playlist.playlistId, currentIndex, currentIndex + 1)
-                            draggedIndex = currentIndex + 1 // Важно для корректного отображения индекса
-                            dragOffsetY -= itemHeightPx
-                        } else if (dragOffsetY < -threshold && currentIndex > 0) {
-                            val movedTrack = localTracks.removeAt(currentIndex)
-                            localTracks.add(currentIndex - 1, movedTrack)
-                            viewModel.moveTrackInPlaylist(playlist.playlistId, currentIndex, currentIndex - 1)
-                            draggedIndex = currentIndex - 1
-                            dragOffsetY += itemHeightPx
+                        if (draggedIndex == -1 || itemHeightPx <= 0f) return
+
+                        // Считаем точное количество шагов смещения
+                        val offsetInItems = (dragOffsetY / itemHeightPx).roundToInt()
+                        if (offsetInItems == 0) return
+
+                        // Защищаем от вылета за пределы экрана
+                        val targetIdx = (draggedIndex + offsetInItems).coerceIn(0, localTracks.lastIndex)
+
+                        if (targetIdx != draggedIndex) {
+                            val movedTrack = localTracks.removeAt(draggedIndex)
+                            localTracks.add(targetIdx, movedTrack)
+
+                            viewModel.moveTrackInPlaylist(playlist.playlistId, draggedIndex, targetIdx)
+
+                            // Компенсируем сдвиг, чтобы трек не "улетал" из-под пальца
+                            dragOffsetY -= (targetIdx - draggedIndex) * itemHeightPx
+                            draggedIndex = targetIdx
                         }
                     }
 
-                    // ИСПРАВЛЕННЫЙ МОТОРЧИК ИЗ НАШЕГО ПРЕДЫДУЩЕГО ШАГА!
                     LaunchedEffect(draggedIndex) {
                         while (draggedIndex != -1) {
                             val track = localTracks.getOrNull(draggedIndex) ?: break
@@ -604,11 +605,11 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
                                             Spacer(modifier = Modifier.width(16.dp))
                                             Icon(
                                                 Icons.Default.DragHandle, contentDescription = "Перетащить", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(32.dp)
-                                                    .pointerInput(localTracks) {
+                                                    .pointerInput(track.uri) { // <--- ПРИВЯЗАЛИ ЖЕСТКО К САМОМУ ТРЕКУ
                                                         detectVerticalDragGestures(
                                                             onDragStart = {
                                                                 isAnyTrackDragging = true
-                                                                draggedIndex = index
+                                                                draggedIndex = localTracks.indexOf(track) // <--- СТАРТ С ТЕКУЩЕГО МЕСТА
                                                                 dragOffsetY = 0f
                                                             },
                                                             onDragEnd = { isAnyTrackDragging = false; draggedIndex = -1; dragOffsetY = 0f },

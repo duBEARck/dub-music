@@ -1453,7 +1453,7 @@ fun RealStatsScreen(viewModel: MusicViewModel, onNavigateToLibrary: () -> Unit) 
                             Box(modifier = Modifier.weight(1f)) {
                                 TrackRowItem(
                                     track = record.track,
-                                    coverUri = viewModel.getAlbumCoverPath(record.track.artist, record.track.album),
+                                    coverUri = viewModel.getAlbumCoverPath(record.track),
                                     isPlaying = false,
                                     trailingText = "${record.statValue} раз"
                                 ) {

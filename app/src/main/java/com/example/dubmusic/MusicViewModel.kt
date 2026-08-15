@@ -115,16 +115,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         // --- РАЗОВАЯ ЧИСТКА СТАРЫХ ТРЕКОВ ---
         // (Можешь просто удалить этот блок после одного запуска приложения)
         viewModelScope.launch(Dispatchers.IO) {
-            val unprocessed = dao.getUnprocessedTracks().firstOrNull() ?: emptyList()
-            unprocessed.forEach { track ->
-                val smartData = extractMetadata(track.uri)
-                dao.updateTrack(track.copy(
-                    fileName = smartData.realFileName,
-                    title = smartData.title,
-                    artist = smartData.artist,
-                    album = smartData.album,
-                    year = smartData.year
-                ))
+            try {
+                val unprocessed = dao.getUnprocessedTracks().firstOrNull() ?: emptyList()
+                unprocessed.forEach { track ->
+                    val smartData = extractMetadata(track.uri)
+                    dao.updateTrack(track.copy(
+                        fileName = smartData.realFileName,
+                        title = smartData.title,
+                        artist = smartData.artist,
+                        album = smartData.album,
+                        year = smartData.year
+                    ))
+                }
+            } catch (e: Throwable) {
+                // Ловим любые исключения при фоновой обработке битых треков
+                android.util.Log.e("MusicViewModel", "Ошибка фоновой обработки трека: ${e.message}")
             }
         }
     }
@@ -132,8 +137,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     // Функция добавления файлов из проводника
     fun addUnprocessedFile(uriString: String) {
         viewModelScope.launch(Dispatchers.IO) {
+            val smartData = extractMetadata(uriString)
+
+            val allProcessed = processedTracks.first()
+            val allUnprocessed = unprocessedTracks.first()
+
+            // Если трек с таким именем уже есть где-либо в приложении — игнорируем!
+            val isDuplicate = allProcessed.any { it.fileName == smartData.realFileName } ||
+                    allUnprocessed.any { it.fileName == smartData.realFileName }
+
+            if (isDuplicate) {
+                return@launch // Жестко прерываем добавление
+            }
+
             var duration = 0L
-            val smartData = extractMetadata(uriString) // Ошибок больше не будет!
 
             try {
                 val retriever = android.media.MediaMetadataRetriever()
@@ -161,6 +178,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
     }
+
     fun setArtistPhoto(artistName: String, uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -1042,20 +1060,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val uri = Uri.parse(uriString)
         val context = getApplication<Application>().applicationContext
 
-        // 1. Достаем реальное имя файла
+        // 1. Достаем реальное имя файла (С ЗАЩИТОЙ ОТ ВЫЛЕТОВ)
         var realFileName = "Неизвестный файл"
-        if (uri.scheme == "content") {
-            val cursor = context.contentResolver.query(uri, null, null, null, null)
-            cursor?.use {
-                if (it.moveToFirst()) {
-                    val index = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                    if (index != -1) {
-                        realFileName = it.getString(index)
+        try {
+            if (uri.scheme == "content") {
+                val cursor = context.contentResolver.query(uri, null, null, null, null)
+                cursor?.use {
+                    if (it.moveToFirst()) {
+                        val index = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                        if (index != -1) {
+                            realFileName = it.getString(index) ?: "Неизвестный файл"
+                        }
                     }
                 }
+            } else {
+                realFileName = uri.path?.substringAfterLast('/') ?: "Неизвестный файл"
             }
-        } else {
-            realFileName = uri.path?.substringAfterLast('/') ?: "Неизвестный файл"
+        } catch (e: Exception) {
+            // Если файла нет на диске или ссылка мертва — не даем приложению упасть!
+            e.printStackTrace()
         }
 
         var title: String? = null
@@ -1064,8 +1087,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         var year: Int? = null
         var coverArt: ByteArray? = null
         var trackType: String? = null
-
-        // --- НОВАЯ ПЕРЕМЕННАЯ ДЛЯ ТЕКСТА ---
         var lyricsText: String? = null
 
         // 2. Пуленепробиваемое чтение через временный файл
@@ -1076,33 +1097,38 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 tempFile.outputStream().use { output -> input.copyTo(output) }
             }
 
-            // Спокойно читаем теги нормальным путем
-            val audioFile = org.jaudiotagger.audio.AudioFileIO.read(tempFile)
-            val tag = audioFile.tag
+            // Проверяем, что временный файл успешно создался и не пустой
+            if (tempFile.exists() && tempFile.length() > 0) {
+                // Спокойно читаем теги нормальным путем
+                val audioFile = org.jaudiotagger.audio.AudioFileIO.read(tempFile)
+                val tag = audioFile.tag
 
-            if (tag != null) {
-                fun clean(str: String?) = str?.trim()?.replace(Regex("\\s+"), " ")?.takeIf { it.isNotBlank() }
+                if (tag != null) {
+                    fun clean(str: String?) = str?.trim()?.replace(Regex("\\s+"), " ")?.takeIf { it.isNotBlank() }
 
-                title = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.TITLE))
-                artist = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.ARTIST))
-                album = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.ALBUM))
-                year = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.YEAR))?.take(4)?.toIntOrNull()
-                coverArt = tag.firstArtwork?.binaryData
+                    title = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.TITLE))
+                    artist = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.ARTIST))
+                    album = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.ALBUM))
+                    year = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.YEAR))?.take(4)?.toIntOrNull()
+                    coverArt = tag.firstArtwork?.binaryData
 
-                // Читаем наш секретный комментарий (DEMO / UNRELEASED)
-                val comment = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.COMMENT))
-                if (comment != null && comment.startsWith("DUBMUSIC=")) {
-                    trackType = comment.substringAfter("DUBMUSIC=")
+                    // Читаем наш секретный комментарий (DEMO / UNRELEASED)
+                    val comment = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.COMMENT))
+                    if (comment != null && comment.startsWith("DUBMUSIC=")) {
+                        trackType = comment.substringAfter("DUBMUSIC=")
+                    }
+
+                    // --- ЧИТАЕМ ТЕКСТ ИЗ ФАЙЛА ---
+                    lyricsText = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.LYRICS))
                 }
-
-                // --- НОВОЕ: ЧИТАЕМ ТЕКСТ ИЗ ФАЙЛА ---
-                lyricsText = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.LYRICS))
             }
         } catch (e: Exception) {
             e.printStackTrace()
         } finally {
             // Обязательно удаляем временный файл, чтобы не засорять память
-            tempFile.delete()
+            if (tempFile.exists()) {
+                tempFile.delete()
+            }
         }
 
         // 3. Фолбэк: если тегов внутри физически нет, пытаемся угадать по имени файла
@@ -1124,7 +1150,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             year = year,
             coverArt = coverArt,
             trackType = trackType,
-            lyrics = lyricsText // --- ПЕРЕДАЕМ ТЕКСТ ДАЛЬШЕ ---
+            lyrics = lyricsText
         )
     }
 
