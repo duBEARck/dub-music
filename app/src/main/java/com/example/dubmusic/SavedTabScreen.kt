@@ -34,6 +34,7 @@ import coil.compose.rememberAsyncImagePainter
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -43,68 +44,166 @@ import kotlin.math.roundToInt
 
 @Composable
 fun SavedTabScreen(viewModel: MusicViewModel) {
-    val tracksState = viewModel.unprocessedTracks.collectAsState(initial = null)
-    val tracks = tracksState.value
-
     var trackToEdit by remember { mutableStateOf<TrackEntity?>(null) }
+
+    // ПАМЯТЬ ДЛЯ ОТКРЫТЫХ ПАПОК (Изначально пусто -> все папки свернуты)
+    var expandedFolders by remember { mutableStateOf(setOf<String>()) }
+
     val context = LocalContext.current
-
-    val filePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris: List<Uri> ->
-        uris.forEach { uri ->
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { folderUri ->
+        folderUri?.let { uri ->
             try {
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                )
-            } catch (e: Exception) { e.printStackTrace() }
-
-            viewModel.addUnprocessedFile(uri.toString())
+                val takeFlags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                context.contentResolver.takePersistableUriPermission(uri, takeFlags)
+                viewModel.scanAndHealFolder(context, uri)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
+    }
+
+    val processedTracks by viewModel.processedTracks.collectAsState(initial = emptyList())
+    val unprocessedTracks by viewModel.unprocessedTracks.collectAsState(initial = emptyList())
+
+    val tracksByFolder = remember(processedTracks, unprocessedTracks) {
+        // УМНАЯ СОРТИРОВКА (Natural Sort: 1, 2, 10 вместо 1, 10, 2)
+        val naturalSortComparator = Comparator<String> { s1, s2 ->
+            val num1 = s1.takeWhile { it.isDigit() }.toIntOrNull()
+            val num2 = s2.takeWhile { it.isDigit() }.toIntOrNull()
+            when {
+                num1 != null && num2 != null -> {
+                    val cmp = num1.compareTo(num2)
+                    if (cmp != 0) cmp else s1.compareTo(s2, ignoreCase = true)
+                }
+                num1 != null -> -1 // Если только у s1 есть число, он идет выше
+                num2 != null -> 1  // Если только у s2 есть число, он идет выше
+                else -> s1.compareTo(s2, ignoreCase = true) // Обычный алфавит
+            }
+        }
+
+        val combinedList = processedTracks.map { it to true } + unprocessedTracks.map { it to false }
+        combinedList
+            .groupBy { viewModel.getFolderNameFromUri(it.first.uri) }
+            .toSortedMap(naturalSortComparator) // Применяем нашу умную сортировку
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarsPadding() // Отступ от статус-бара для всего экрана
+            .statusBarsPadding()
     ) {
+        // ИСПРАВЛЕННАЯ ШАПКА (чтобы кнопка не плющилась)
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Необработанные", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            FilledTonalButton(onClick = { filePickerLauncher.launch(arrayOf("audio/*")) }) {
+            Text("Медиатека", fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+
+            FilledTonalButton(
+                onClick = { folderPickerLauncher.launch(null) },
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+            ) {
                 Icon(Icons.Default.Add, contentDescription = "Добавить")
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Загрузить")
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Добавить папку")
             }
         }
 
-        if (tracks == null) {
-            Box(modifier = Modifier.fillMaxSize())
-        } else if (tracks.isEmpty()) {
+        if (tracksByFolder.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Все файлы обработаны.\nЗагрузите новые.", color = Color.Gray)
+                Text("Здесь пока пусто.\nЗагрузите папку с музыкой.", color = Color.Gray, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
             }
         } else {
-            LazyColumn(contentPadding = PaddingValues(bottom = 80.dp)) {
-                items(tracks, key = { it.uri }) { track ->
-                    UnprocessedTrackItem(
-                        track = track,
-                        onEdit = { trackToEdit = track },
-                        onHide = { viewModel.hideTrack(track) },
-                        onPlay = {
-                            viewModel.playTrack(
-                                track = track,
-                                playlist = tracks,
-                                forcedTitle = "Необработанные"
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 80.dp)
+            ) {
+                tracksByFolder.forEach { (folderName, tracksInFolder) ->
+                    // Проверяем, есть ли папка в списке ОТКРЫТЫХ
+                    val isExpanded = expandedFolders.contains(folderName)
+
+                    // ЗАГОЛОВОК ПАПКИ
+                    item {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                                .clickable {
+                                    // Логика сворачивания/разворачивания
+                                    expandedFolders = if (isExpanded) expandedFolders - folderName else expandedFolders + folderName
+                                }
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (isExpanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
                             )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                text = folderName,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 18.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text("${tracksInFolder.size}", fontSize = 14.sp, color = Color.Gray)
                         }
-                    )
+                    }
+
+                    // ТРЕКИ ВНУТРИ ПАПКИ (Рисуем ТОЛЬКО если папка открыта)
+                    if (isExpanded) {
+                        items(tracksInFolder, key = { it.first.uri }) { (track, isProcessed) ->
+                            if (isProcessed) {
+                                val coverPath = viewModel.getAlbumCoverPath(track)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { viewModel.playTrack(track, tracksInFolder.map { it.first }) }
+                                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    if (coverPath != null) {
+                                        Image(
+                                            painter = coil.compose.rememberAsyncImagePainter(java.io.File(coverPath)),
+                                            contentDescription = null,
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))
+                                        )
+                                    } else {
+                                        Box(
+                                            modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(Icons.Default.Audiotrack, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.width(16.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(text = track.title?.ifEmpty { track.fileName } ?: track.fileName, maxLines = 1, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                                        Text(text = track.artist?.ifEmpty { "Неизвестный исполнитель" } ?: "Неизвестный исполнитель", fontSize = 14.sp, color = Color.Gray, maxLines = 1)
+                                    }
+                                }
+                                HorizontalDivider(modifier = Modifier.padding(start = 80.dp, end = 16.dp), thickness = 1.dp, color = Color.LightGray.copy(alpha = 0.3f))
+                            } else {
+                                Box(modifier = Modifier.alpha(0.6f)) {
+                                    UnprocessedTrackItem(
+                                        track = track,
+                                        onEdit = { trackToEdit = track },
+                                        onHide = { viewModel.hideTrack(track) },
+                                        onPlay = { viewModel.playTrack(track, tracksInFolder.map { it.first }, forcedTitle = folderName) }
+                                    )
+                                }
+                            }
+                        }
+                        item { Spacer(modifier = Modifier.height(8.dp)) }
+                    }
                 }
             }
         }
@@ -366,48 +465,109 @@ fun PlaylistsTabScreen(viewModel: MusicViewModel) {
             enter = androidx.compose.animation.slideInHorizontally(initialOffsetX = { it }),
             exit = androidx.compose.animation.slideOutHorizontally(targetOffsetX = { it })
         ) {
+            // --- 1. ДОБАВЛЯЕМ ЛОГИКУ ГРУППИРОВКИ ---
+            // Собираем необработанные треки (processedTracks у тебя уже есть)
+            val unprocessed by viewModel.unprocessedTracks.collectAsState(initial = emptyList())
+
+            val tracksByFolder = remember(processedTracks, unprocessed) {
+                val combinedList = processedTracks.map { it to true } + unprocessed.map { it to false }
+                combinedList
+                    .groupBy { viewModel.getFolderNameFromUri(it.first.uri) }
+                    .toSortedMap()
+            }
+
             Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
                 Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(16.dp)) {
                         IconButton(onClick = { viewModel.setShowAllTracksPlaylists(false) }) { Icon(Icons.Default.ArrowBack, contentDescription = "Назад") }
                         Text("Все скачанные треки", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                     }
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
-                        items(processedTracks, key = { it.uri }) { track ->
-                            val isPlayingThis = currentTrack?.uri == track.uri
-                            val coverPath = viewModel.getAlbumCoverPath(track)
 
-                            Column {
+                    // --- 2. ЗАМЕНЯЕМ СТАРЫЙ LazyColumn НА СГРУППИРОВАННЫЙ ---
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        tracksByFolder.forEach { (folderName, tracksInFolder) ->
+
+                            // ЗАГОЛОВОК ПАПКИ
+                            item {
                                 Row(
-                                    modifier = Modifier.fillMaxWidth().background(if (isPlayingThis) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
-                                        .clickable { viewModel.playTrack(track, processedTracks) }
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
                                         .padding(horizontal = 16.dp, vertical = 12.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    // ИСПОЛЬЗУЕМ АСИНХРОННЫЙ COIL ДЛЯ ИДЕАЛЬНОЙ ПРОКРУТКИ
-                                    if (coverPath != null) {
-                                        Image(
-                                            painter = coil.compose.rememberAsyncImagePainter(java.io.File(coverPath)),
-                                            contentDescription = null,
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))
-                                        )
-                                    } else {
-                                        Box(modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(if (isPlayingThis) MaterialTheme.colorScheme.primary else Color.Transparent), contentAlignment = Alignment.Center) { Icon(Icons.Default.Audiotrack, contentDescription = null, tint = if (isPlayingThis) Color.White else MaterialTheme.colorScheme.primary) }
-                                    }
+                                    Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Text(
+                                        text = folderName,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 18.sp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
 
-                                    Spacer(modifier = Modifier.width(16.dp))
+                            // ТРЕКИ ВНУТРИ ЭТОЙ ПАПКИ
+                            items(tracksInFolder) { (track, isProcessed) ->
+                                if (isProcessed) {
+                                    // ========================================================
+                                    // ТВОЙ ОРИГИНАЛЬНЫЙ ДИЗАЙН ДЛЯ ОБРАБОТАННЫХ ТРЕКОВ
+                                    // ========================================================
+                                    val isPlayingThis = currentTrack?.uri == track.uri
+                                    val coverPath = viewModel.getAlbumCoverPath(track)
 
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(text = track.title ?: track.fileName, fontSize = 16.sp, fontWeight = if (isPlayingThis) FontWeight.Bold else FontWeight.Medium, color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                                            TrackBadge(isDemo = track.isDemo, isUnreleased = track.isUnreleased)
+                                    Column {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().background(if (isPlayingThis) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                                                .clickable { viewModel.playTrack(track, processedTracks) }
+                                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            if (coverPath != null) {
+                                                Image(
+                                                    painter = coil.compose.rememberAsyncImagePainter(java.io.File(coverPath)),
+                                                    contentDescription = null,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))
+                                                )
+                                            } else {
+                                                Box(modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(if (isPlayingThis) MaterialTheme.colorScheme.primary else Color.Transparent), contentAlignment = Alignment.Center) { Icon(Icons.Default.Audiotrack, contentDescription = null, tint = if (isPlayingThis) Color.White else MaterialTheme.colorScheme.primary) }
+                                            }
+
+                                            Spacer(modifier = Modifier.width(16.dp))
+
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text(text = track.title ?: track.fileName, fontSize = 16.sp, fontWeight = if (isPlayingThis) FontWeight.Bold else FontWeight.Medium, color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                                                    TrackBadge(isDemo = track.isDemo, isUnreleased = track.isUnreleased)
+                                                }
+                                                Text(text = track.artist ?: "Неизвестный исполнитель", fontSize = 14.sp, color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else Color.Gray, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                                            }
                                         }
-                                        Text(text = track.artist ?: "Неизвестный исполнитель", fontSize = 14.sp, color = if (isPlayingThis) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else Color.Gray, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                                        HorizontalDivider(modifier = Modifier.padding(start = 56.dp, end = 16.dp), thickness = 1.dp, color = Color.LightGray.copy(alpha = 0.5f))
+                                    }
+                                } else {
+                                    // ========================================================
+                                    // НОВЫЙ ДИЗАЙН ДЛЯ НЕОБРАБОТАННЫХ ТРЕКОВ
+                                    // ========================================================
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .alpha(0.5f)
+                                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(Icons.Default.HourglassEmpty, contentDescription = "Не обработан", tint = Color.Gray)
+                                        Spacer(modifier = Modifier.width(16.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(text = track.fileName, maxLines = 1, fontSize = 16.sp)
+                                            Text(text = "Ожидает обработки...", fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                                        }
                                     }
                                 }
-                                HorizontalDivider(modifier = Modifier.padding(start = 56.dp, end = 16.dp), thickness = 1.dp, color = Color.LightGray.copy(alpha = 0.5f))
                             }
+
+                            item { Spacer(modifier = Modifier.height(8.dp)) }
                         }
                     }
                 }

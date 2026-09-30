@@ -60,6 +60,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.zIndex
 
@@ -682,12 +683,92 @@ fun FullScreenPlayer(
                 }
 
                 var showMenu by remember { mutableStateOf(false) }
+
+                // Состояния для двух разных диалогов
+                var trackToReset by remember { mutableStateOf<TrackEntity?>(null) }
+                var trackToDelete by remember { mutableStateOf<TrackEntity?>(null) }
+
                 Box {
-                    IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "Опции") }
-                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                        DropdownMenuItem(text = { Text("Изменить информацию") }, onClick = { showMenu = false; onEdit() })
-                        DropdownMenuItem(text = { Text("Добавить в плейлист") }, onClick = { showMenu = false; showPlaylistSelector = true })
+                    IconButton(onClick = { showMenu = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "Опции")
                     }
+
+                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Изменить информацию") },
+                            onClick = { showMenu = false; onEdit() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Добавить в плейлист") },
+                            onClick = { showMenu = false; showPlaylistSelector = true }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Удалить из обработанных", color = MaterialTheme.colorScheme.error) },
+                            onClick = {
+                                showMenu = false
+                                trackToReset = track // Открывает диалог сброса
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Удалить трек из базы", color = MaterialTheme.colorScheme.error) },
+                            onClick = {
+                                showMenu = false
+                                trackToDelete = track // Открывает диалог удаления
+                            }
+                        )
+                    }
+                }
+
+                // --- ДИАЛОГ 1: ПОДТВЕРЖДЕНИЕ СБРОСА ---
+                if (trackToReset != null) {
+                    AlertDialog(
+                        onDismissRequest = { trackToReset = null },
+                        title = { Text("Удалить из обработанных?") },
+                        text = {
+                            Text("Трек потеряет красивое название, обложку и вернется в статус «ожидает обработки». История прослушиваний при этом не удалится.")
+                        },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    viewModel.resetTrackInfo(trackToReset!!)
+                                    trackToReset = null
+                                }
+                            ) {
+                                Text("Сбросить", color = MaterialTheme.colorScheme.error)
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { trackToReset = null }) {
+                                Text("Отмена", color = MaterialTheme.colorScheme.onSurface)
+                            }
+                        }
+                    )
+                }
+
+                // --- ДИАЛОГ 2: ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ ---
+                if (trackToDelete != null) {
+                    AlertDialog(
+                        onDismissRequest = { trackToDelete = null },
+                        title = { Text("Удалить трек из базы?") },
+                        text = {
+                            Text("Этот трек и его обложка будут навсегда удалены из базы данных приложения. Физический аудиофайл на устройстве останется нетронутым.")
+                        },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    viewModel.completelyDeleteTrack(trackToDelete!!)
+                                    trackToDelete = null
+                                }
+                            ) {
+                                Text("Удалить", color = MaterialTheme.colorScheme.error)
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { trackToDelete = null }) {
+                                Text("Отмена", color = MaterialTheme.colorScheme.onSurface)
+                            }
+                        }
+                    )
                 }
             }
 
@@ -1253,6 +1334,14 @@ fun RealStatsScreen(viewModel: MusicViewModel, onNavigateToLibrary: () -> Unit) 
     val periodNames = listOf("День", "Неделя", "Месяц", "Год", "Всё время")
     val periods = StatsPeriod.values()
 
+    // для создания бэкапа
+    val context = LocalContext.current
+    val backupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        uri?.let { viewModel.backupDatabase(context, it) }
+    }
+
     Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
 
         // ШАПКА С КНОПКОЙ КАЛЕНДАРЯ
@@ -1467,7 +1556,26 @@ fun RealStatsScreen(viewModel: MusicViewModel, onNavigateToLibrary: () -> Unit) 
                 }
             }
 
-            item { Spacer(modifier = Modifier.height(80.dp)) }
+            item {
+                Spacer(modifier = Modifier.height(32.dp))
+
+                Button(
+                    onClick = {
+                        backupLauncher.launch("dubmusic_backup_${System.currentTimeMillis()}.db")
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.secondary
+                    )
+                ) {
+                    Text("Сделать бэкап базы данных", color = Color.White)
+                }
+
+                Spacer(modifier = Modifier.height(80.dp)) // Твой старый отступ для нижнего меню
+            }
+
         }
     }
 

@@ -249,6 +249,18 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE uri = :uri LIMIT 1")
     fun getTrackByUri(uri: String): Flow<TrackEntity?>
 
+    //Баг с Queen
+    // 1. Переносим статистику со старого трека на новый
+    @Query("UPDATE listening_history SET trackUri = :newUri WHERE trackUri = :oldUri")
+    fun updateHistoryUri(oldUri: String, newUri: String)
+
+    // 2. Удаляем старый битый трек
+    @Query("DELETE FROM tracks WHERE uri = :uri")
+    fun deleteTrackByUri(uri: String)
+
+    @Query("UPDATE tracks SET durationMs = :newDuration WHERE uri = :uri")
+    fun updateTrackDuration(uri: String, newDuration: Long)
+
     @Delete
     fun deletePlaylist(playlist: PlaylistEntity)
 }

@@ -1,6 +1,5 @@
 package com.example.dubmusic
 
-import android.R.attr.track
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -142,27 +141,64 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             val allProcessed = processedTracks.first()
             val allUnprocessed = unprocessedTracks.first()
 
-            // Если трек с таким именем уже есть где-либо в приложении — игнорируем!
-            val isDuplicate = allProcessed.any { it.fileName == smartData.realFileName } ||
-                    allUnprocessed.any { it.fileName == smartData.realFileName }
-
-            if (isDuplicate) {
-                return@launch // Жестко прерываем добавление
-            }
-
+            // 1. НАДЕЖНО ДОСТАЕМ ДЛИТЕЛЬНОСТЬ ЧЕРЕЗ FileDescriptor
             var duration = 0L
-
             try {
-                val retriever = android.media.MediaMetadataRetriever()
-                retriever.setDataSource(getApplication(), Uri.parse(uriString))
-                val timeString = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
-                duration = timeString?.toLong() ?: 0L
-                retriever.release()
+                val uri = android.net.Uri.parse(uriString)
+                val pfd = getApplication<android.app.Application>().contentResolver.openFileDescriptor(uri, "r")
+                if (pfd != null) {
+                    val retriever = android.media.MediaMetadataRetriever()
+                    retriever.setDataSource(pfd.fileDescriptor)
+                    val timeString = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    duration = timeString?.toLong() ?: 0L
+                    retriever.release()
+                    pfd.close()
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
 
-            // Добавляем трек с флагами из MP3-файла
+            // =========================================================
+            // 2. УНИВЕРСАЛЬНЫЙ ПОИСК И ЛЕЧЕНИЕ (ЗАМЕНЯЕТ СПЕЦ. БЛОК QUEEN)
+            // =========================================================
+
+            // Ищем трек в базе строго по имени файла (это 100% надежно)
+            val existingTrack = allProcessed.find { it.fileName == smartData.realFileName }
+                ?: allUnprocessed.find { it.fileName == smartData.realFileName }
+
+            if (existingTrack != null) {
+                // Если у трека та же ссылка и нормальная длительность — это дубликат, прерываем
+                if (existingTrack.uri == uriString && existingTrack.durationMs > 0L) {
+                    return@launch
+                }
+
+                // ИНАЧЕ: Ссылка изменилась ИЛИ длительность была нулевой -> ЛЕЧИМ!
+                val updatedTrack = existingTrack.copy(
+                    uri = uriString, // Спасаем мертвую ссылку
+                    durationMs = if (duration > 0L) duration else existingTrack.durationMs,
+
+                    // БЕЗОПАСНАЯ ПРОВЕРКА НА NULL:
+                    title = if (existingTrack.title.isNullOrBlank()) smartData.title else existingTrack.title,
+                    artist = if (existingTrack.artist.isNullOrBlank()) smartData.artist else existingTrack.artist,
+                    album = if (existingTrack.album.isNullOrBlank()) smartData.album else existingTrack.album
+                )
+
+                // 1. Сохраняем обновленный трек
+                dao.insertTrack(updatedTrack)
+
+                // 2. Уничтожаем старую сломанную запись, чтобы не плодились дубликаты!
+                if (existingTrack.uri != uriString) {
+                    dao.updateHistoryUri(oldUri = existingTrack.uri, newUri = uriString)
+                    dao.deleteTrackByUri(existingTrack.uri)
+                }
+
+                return@launch // Трек успешно вылечен, выходим
+            }
+
+            // =========================================================
+            // 3. ЕСЛИ ТРЕКА НЕТ В БАЗЕ — ДОБАВЛЯЕМ КАК НОВЫЙ
+            // =========================================================
+
             dao.insertTrack(
                 TrackEntity(
                     uri = uriString,
@@ -1200,6 +1236,174 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             } finally {
                 tempFile.delete()
             }
+        }
+    }
+
+    fun healZeroDurations() {
+        val context = getApplication<android.app.Application>()
+
+        viewModelScope.launch(Dispatchers.IO) {
+            // 1. Сообщаем, что процесс пошел (Toast работает только на главном потоке)
+            withContext(Dispatchers.Main) {
+                android.widget.Toast.makeText(context, "Ищем нулевые треки...", android.widget.Toast.LENGTH_SHORT).show()
+            }
+
+            val allProcessed = processedTracks.first()
+            val allUnprocessed = unprocessedTracks.first()
+
+            val tracksToHeal = (allProcessed + allUnprocessed).filter { it.durationMs == 0L }
+
+            if (tracksToHeal.isEmpty()) {
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(context, "Нулевых треков не найдено!", android.widget.Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+
+            var healedCount = 0
+            var errorCount = 0
+
+            for (track in tracksToHeal) {
+                try {
+                    val uri = android.net.Uri.parse(track.uri)
+                    val pfd = context.contentResolver.openFileDescriptor(uri, "r")
+                    if (pfd != null) {
+                        val retriever = android.media.MediaMetadataRetriever()
+                        retriever.setDataSource(pfd.fileDescriptor)
+                        val timeStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                        val actualDuration = timeStr?.toLong() ?: 0L
+
+                        retriever.release()
+                        pfd.close()
+
+                        if (actualDuration > 0L) {
+                            dao.updateTrackDuration(track.uri, actualDuration)
+                            healedCount++
+                        } else {
+                            errorCount++
+                        }
+                    } else {
+                        errorCount++
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    errorCount++ // Сюда мы попадаем, если Android отобрал права на чтение!
+                }
+            }
+
+            // 2. Отчитываемся о результатах
+            withContext(Dispatchers.Main) {
+                val message = if (healedCount > 0) {
+                    "Вылечено треков: $healedCount! (Ошибок: $errorCount)"
+                } else {
+                    "Не удалось вылечить. Нет прав доступа? (Ошибок: $errorCount)"
+                }
+                android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun backupDatabase(context: android.content.Context, destinationUri: android.net.Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // ⚠️ ВАЖНО: Замени "music_database" на реальное имя твоей БД в Room!
+                // Если не помнишь, посмотри в файле, где ты создаешь базу (DatabaseBuilder)
+                val dbName = "dubmusic-database"
+
+                val dbFile = context.getDatabasePath(dbName)
+
+                if (!dbFile.exists()) {
+                    withContext(Dispatchers.Main) {
+                        android.widget.Toast.makeText(context, "Файл базы данных не найден!", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                    return@launch
+                }
+
+                // Копируем файл из закрытого хранилища приложения в выбранную тобой папку
+                context.contentResolver.openOutputStream(destinationUri)?.use { outputStream ->
+                    java.io.FileInputStream(dbFile).use { inputStream ->
+                        inputStream.copyTo(outputStream)
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(context, "Бэкап успешно сохранён!", android.widget.Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(context, "Ошибка при создании бэкапа!", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    //запоминает сразу всю папку
+    fun scanAndHealFolder(context: android.content.Context, folderUri: android.net.Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            // DocumentFile позволяет безопасно обходить папки, на которые получено разрешение
+            val rootFolder = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, folderUri)
+
+            fun traverseFolder(folder: androidx.documentfile.provider.DocumentFile?) {
+                folder?.listFiles()?.forEach { file ->
+                    if (file.isDirectory) {
+                        traverseFolder(file) // Если это папка - ныряем внутрь
+                    } else if (file.isFile && file.type?.startsWith("audio/") == true) {
+                        // Это аудиофайл. Скармливаем его твоей УЖЕ ГОТОВОЙ умной функции!
+                        // Она сама поймет: это новый трек или сломанный старый, который надо вылечить.
+                        addUnprocessedFile(file.uri.toString())
+                    }
+                }
+            }
+
+            traverseFolder(rootFolder)
+        }
+    }
+
+    // Функция для вытаскивания имени папки прямо из системной ссылки
+    fun getFolderNameFromUri(uriString: String): String {
+        return try {
+            val decoded = android.net.Uri.decode(uriString)
+            val path = decoded.substringAfterLast("document/", "")
+            val parts = path.split(":", "/")
+            val folderName = if (parts.size >= 2) parts[parts.lastIndex - 1] else "Музыка"
+
+            if (folderName.equals("audio", ignoreCase = true) || folderName == "primary") "Разное" else folderName
+        } catch (e: Exception) {
+            "Разное"
+        }
+    }
+
+
+    // Возвращает трек к "заводским" настройкам
+    fun resetTrackInfo(track: TrackEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val resetTrack = track.copy(
+                title = null,
+                artist = null,
+                album = null,
+                isDemo = false,
+                isUnreleased = false,
+                isProcessed = false
+            )
+            // insertTrack сработает как обновление (REPLACE), так как URI остался прежним
+            dao.insertTrack(resetTrack)
+        }
+    }
+    fun completelyDeleteTrack(track: TrackEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            // 1. Удаляем обложку из кэша телефона (чтобы не занимала место)
+            val coverPath = getAlbumCoverPath(track)
+            if (coverPath != null) {
+                try {
+                    java.io.File(coverPath).delete()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+
+            // 2. Полностью стираем трек-призрак из базы данных
+            dao.deleteTrackByUri(track.uri)
         }
     }
 }
