@@ -111,7 +111,6 @@ class MusicService : Service() {
     }
 
     // Эта функция будет менять песню и кнопки в шторке
-    // Эта функция будет менять песню и кнопки в шторке
     fun updateNotification(title: String, artist: String, isPlaying: Boolean) {
         val track = currentTrackItem
         var albumBitmap: Bitmap? = null
@@ -120,7 +119,7 @@ class MusicService : Service() {
         if (track != null && !track.artist.isNullOrBlank()) {
 
             // Отсекаем гостей для поиска картинки
-            val primaryArtist = track.artist.split(",").map { it.trim() }.firstOrNull { it.isNotBlank() } ?: track.artist
+            val primaryArtist = parseArtists(track.artist).first()
 
             // Если альбома нет (сингл), ищем по названию трека
             val effectiveAlbum = if (track.album.isNullOrBlank()) (track.title ?: track.fileName) else track.album

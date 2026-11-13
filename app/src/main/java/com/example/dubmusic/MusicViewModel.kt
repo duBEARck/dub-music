@@ -29,30 +29,67 @@ data class SmartMetadata(
     val album: String?,
     val year: Int?,
     val coverArt: ByteArray?,
-    val trackType: String?, // НОВОЕ ПОЛЕ (DEMO, UNRELEASED)
-    val lyrics: String?
+    val trackType: String?, // (DEMO, UNRELEASED, LIVE)
+    val lyrics: String?,
+    val liveCity: String? = null,
+    val liveYear: Int? = null
 )
 enum class PlaybackMode {
     NORMAL, SHUFFLE, REPEAT_ALL, REPEAT_ONE
 }
 enum class StatsPeriod { DAY, WEEK, MONTH, YEAR, ALL_TIME }
+
+// Разбивает строку на отдельных артистов (игнорируя /, и \,), и убирает слеши из имен
+fun parseArtists(artistStr: String?): List<String> {
+    if (artistStr.isNullOrBlank()) return listOf("Неизвестный исполнитель")
+    return artistStr
+        .split(Regex("(?<![/\\\\]),"))
+        .map { it.replace("/,", ",").replace("\\,", ",").trim() }
+        .filter { it.isNotBlank() }
+        .ifEmpty { listOf("Неизвестный исполнитель") }
+}
+
+// Убирает технические слеши (/ и \) перед запятой для красивого отображения на экране
+fun formatArtistDisplay(artistStr: String?): String {
+    if (artistStr.isNullOrBlank()) return "Неизвестный исполнитель"
+    return artistStr.replace("/,", ",").replace("\\,", ",")
+}
+
+// Для трека: автоматически добавляет "• Город, Год", если это LIVE-выступление
+fun formatArtistDisplay(track: TrackEntity): String {
+    val baseArtist = formatArtistDisplay(track.artist)
+    if (!track.isLive) return baseArtist
+    val liveInfo = listOfNotNull(
+        track.liveCity?.takeIf { it.isNotBlank() },
+        track.liveYear?.toString()
+    ).joinToString(", ")
+    return if (liveInfo.isNotEmpty()) "$baseArtist • $liveInfo" else baseArtist
+}
+
 class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
-    // 1. ОПИСЫВАЕМ МИГРАЦИЮ С ВЕРСИИ 3 НА 4
+    // 1. ОПИСЫВАЕМ МИГРАЦИИ
     private val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
         override fun migrate(database: androidx.sqlite.db.SupportSQLiteDatabase) {
-            // Добавляем колонку в таблицу "tracks" (так она у тебя называется в TrackEntity)
             database.execSQL("ALTER TABLE tracks ADD COLUMN lyrics TEXT DEFAULT NULL")
         }
     }
 
-    // 2. БИЛДЕР: Говорим ему использовать миграцию
+    private val MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
+        override fun migrate(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+            database.execSQL("ALTER TABLE tracks ADD COLUMN isLive INTEGER NOT NULL DEFAULT 0")
+            database.execSQL("ALTER TABLE tracks ADD COLUMN liveCity TEXT DEFAULT NULL")
+            database.execSQL("ALTER TABLE tracks ADD COLUMN liveYear INTEGER DEFAULT NULL")
+        }
+    }
+
+    // 2. БИЛДЕР: Говорим ему использовать обе миграции
     private val db = Room.databaseBuilder(
         application,
         AppDatabase::class.java,
         "dubmusic-database"
     )
-        .addMigrations(MIGRATION_3_4)
+        .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
         .build()
 
     private val dao = db.trackDao()
@@ -64,6 +101,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     // Постоянное хранилище настроек Android (не стирается при закрытии приложения) для фото исполнителя
     private val prefs = getApplication<Application>().getSharedPreferences("artist_photos", android.content.Context.MODE_PRIVATE)
     private var cachedTracks: List<TrackEntity> = emptyList()
+    private var cachedPlayDurations: Map<String, Long> = emptyMap()
 
     // --- ГЛОБАЛЬНАЯ ПАМЯТЬ ДЛЯ ПЕРЕХОДОВ ИЗ ПЛЕЕРА ---
     private val _openedArtistName = MutableStateFlow<String?>(null)
@@ -102,11 +140,41 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // --- НАВИГАЦИЯ К АРТИСТУ И АЛЬБОМУ ИЗ ТРЁХ ТОЧЕК ---
+    private val _navigateToLibraryEvent = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val navigateToLibraryEvent = _navigateToLibraryEvent
+
+    fun navigateToArtistFromMenu(artistName: String) {
+        openArtist(artistName)
+        _navigateToLibraryEvent.tryEmit(Unit)
+    }
+
+    fun navigateToAlbumFromMenu(track: TrackEntity) {
+        val primaryArtist = parseArtists(track.artist).first()
+        // Если у трека нет альбома (это сингл), в медиатеке его релиз называется по имени трека
+        val effectiveAlbum = if (track.album.isNullOrBlank()) (track.title ?: track.fileName) else track.album
+        openAlbum(effectiveAlbum, primaryArtist)
+        _navigateToLibraryEvent.tryEmit(Unit)
+    }
+
+    // --- УДАЛЕНИЕ ТРЕКА ИЗ ПЛЕЙЛИСТА ---
+    fun removeTrackFromPlaylist(playlistId: Int, trackUri: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            dao.removeTrackFromPlaylist(playlistId, trackUri)
+        }
+    }
+
     init {
-        // Запускаем сборку библиотеки сразу при создании ViewModel и при любых изменениях в базе
+        // Запускаем сборку библиотеки сразу с учетом популярности треков из истории
         viewModelScope.launch {
-            processedTracks.collect { tracks ->
+            kotlinx.coroutines.flow.combine(
+                processedTracks,
+                dao.getAllTrackStatsForPeriod(0L, Long.MAX_VALUE)
+            ) { tracks, stats ->
+                Pair(tracks, stats.associate { it.track.uri to it.statValue })
+            }.collect { (tracks, playDurations) ->
                 cachedTracks = tracks
+                cachedPlayDurations = playDurations
                 buildLibrary(tracks)
             }
         }
@@ -136,83 +204,97 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     // Функция добавления файлов из проводника
     fun addUnprocessedFile(uriString: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            val smartData = extractMetadata(uriString)
+            addUnprocessedFileInternal(uriString)
+        }
+    }
 
-            val allProcessed = processedTracks.first()
-            val allUnprocessed = unprocessedTracks.first()
+    private suspend fun addUnprocessedFileInternal(uriString: String) {
+        val allProcessed = processedTracks.first()
+        val allUnprocessed = unprocessedTracks.first()
 
-            // 1. НАДЕЖНО ДОСТАЕМ ДЛИТЕЛЬНОСТЬ ЧЕРЕЗ FileDescriptor
-            var duration = 0L
-            try {
-                val uri = android.net.Uri.parse(uriString)
-                val pfd = getApplication<android.app.Application>().contentResolver.openFileDescriptor(uri, "r")
-                if (pfd != null) {
-                    val retriever = android.media.MediaMetadataRetriever()
-                    retriever.setDataSource(pfd.fileDescriptor)
-                    val timeString = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
-                    duration = timeString?.toLong() ?: 0L
-                    retriever.release()
-                    pfd.close()
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
+        // 0. МГНОВЕННАЯ ПРОВЕРКА: если этот точный URI уже есть в базе и он здоровый — сразу выходим, даже не открывая файл!
+        val exactMatch = allProcessed.find { it.uri == uriString }
+            ?: allUnprocessed.find { it.uri == uriString }
+        if (exactMatch != null && exactMatch.durationMs > 0L) {
+            return
+        }
+
+        val smartData = extractMetadata(uriString)
+
+        // 1. НАДЕЖНО ДОСТАЕМ ДЛИТЕЛЬНОСТЬ ЧЕРЕЗ FileDescriptor
+        var duration = 0L
+        try {
+            val uri = android.net.Uri.parse(uriString)
+            val pfd = getApplication<android.app.Application>().contentResolver.openFileDescriptor(uri, "r")
+            if (pfd != null) {
+                val retriever = android.media.MediaMetadataRetriever()
+                retriever.setDataSource(pfd.fileDescriptor)
+                val timeString = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                duration = timeString?.toLong() ?: 0L
+                retriever.release()
+                pfd.close()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // 2. ИЩЕМ СТАРЫЙ ТРЕК (сначала проверяем совпадение папки и имени файла, чтобы не спутать одноимённые файлы из разных папок)
+        val newFolder = getFolderNameFromUri(uriString)
+        val existingTrack = exactMatch
+            ?: allProcessed.find { it.fileName == smartData.realFileName && getFolderNameFromUri(it.uri) == newFolder }
+            ?: allUnprocessed.find { it.fileName == smartData.realFileName && getFolderNameFromUri(it.uri) == newFolder }
+            ?: allProcessed.find { it.fileName == smartData.realFileName && it.durationMs == 0L }
+            ?: allUnprocessed.find { it.fileName == smartData.realFileName && it.durationMs == 0L }
+
+        if (existingTrack != null) {
+            if (existingTrack.uri == uriString && existingTrack.durationMs > 0L) {
+                return
             }
 
-            // =========================================================
-            // 2. УНИВЕРСАЛЬНЫЙ ПОИСК И ЛЕЧЕНИЕ (ЗАМЕНЯЕТ СПЕЦ. БЛОК QUEEN)
-            // =========================================================
-
-            // Ищем трек в базе строго по имени файла (это 100% надежно)
-            val existingTrack = allProcessed.find { it.fileName == smartData.realFileName }
-                ?: allUnprocessed.find { it.fileName == smartData.realFileName }
-
-            if (existingTrack != null) {
-                // Если у трека та же ссылка и нормальная длительность — это дубликат, прерываем
-                if (existingTrack.uri == uriString && existingTrack.durationMs > 0L) {
-                    return@launch
-                }
-
-                // ИНАЧЕ: Ссылка изменилась ИЛИ длительность была нулевой -> ЛЕЧИМ!
-                val updatedTrack = existingTrack.copy(
-                    uri = uriString, // Спасаем мертвую ссылку
+            // ВАЖНО: Если трек уже обработан (isProcessed == true), НИКОГДА не трогаем его названия и альбом (иначе синглы с album == null перезапишутся!)
+            val updatedTrack = if (existingTrack.isProcessed) {
+                existingTrack.copy(
+                    uri = uriString,
+                    durationMs = if (duration > 0L) duration else existingTrack.durationMs
+                )
+            } else {
+                existingTrack.copy(
+                    uri = uriString,
                     durationMs = if (duration > 0L) duration else existingTrack.durationMs,
-
-                    // БЕЗОПАСНАЯ ПРОВЕРКА НА NULL:
                     title = if (existingTrack.title.isNullOrBlank()) smartData.title else existingTrack.title,
                     artist = if (existingTrack.artist.isNullOrBlank()) smartData.artist else existingTrack.artist,
                     album = if (existingTrack.album.isNullOrBlank()) smartData.album else existingTrack.album
                 )
-
-                // 1. Сохраняем обновленный трек
-                dao.insertTrack(updatedTrack)
-
-                // 2. Уничтожаем старую сломанную запись, чтобы не плодились дубликаты!
-                if (existingTrack.uri != uriString) {
-                    dao.updateHistoryUri(oldUri = existingTrack.uri, newUri = uriString)
-                    dao.deleteTrackByUri(existingTrack.uri)
-                }
-
-                return@launch // Трек успешно вылечен, выходим
             }
 
-            // =========================================================
-            // 3. ЕСЛИ ТРЕКА НЕТ В БАЗЕ — ДОБАВЛЯЕМ КАК НОВЫЙ
-            // =========================================================
+            dao.insertTrack(updatedTrack)
 
-            dao.insertTrack(
-                TrackEntity(
-                    uri = uriString,
-                    fileName = smartData.realFileName,
-                    durationMs = duration,
-                    title = smartData.title,
-                    artist = smartData.artist,
-                    album = smartData.album,
-                    year = smartData.year,
-                    isDemo = smartData.trackType == "DEMO",
-                    isUnreleased = smartData.trackType == "UNRELEASED"
-                )
-            )
+            if (existingTrack.uri != uriString) {
+                dao.updateHistoryUri(oldUri = existingTrack.uri, newUri = uriString)
+                dao.updatePlaylistTrackUri(oldUri = existingTrack.uri, newUri = uriString)
+                dao.deleteTrackByUri(existingTrack.uri)
+            }
+            return
         }
+
+        // 3. ЕСЛИ ТРЕКА НЕТ В БАЗЕ — ДОБАВЛЯЕМ КАК НОВЫЙ
+        dao.insertTrack(
+            TrackEntity(
+                uri = uriString,
+                fileName = smartData.realFileName,
+                durationMs = duration,
+                title = smartData.title,
+                artist = smartData.artist,
+                album = smartData.album,
+                year = smartData.year,
+                isDemo = smartData.trackType == "DEMO",
+                isUnreleased = smartData.trackType == "UNRELEASED",
+                isLive = smartData.trackType == "LIVE",
+                liveCity = smartData.liveCity,
+                liveYear = smartData.liveYear,
+                lyrics = smartData.lyrics
+            )
+        )
     }
 
     fun setArtistPhoto(artistName: String, uri: Uri) {
@@ -247,51 +329,63 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun processTrack(track: TrackEntity, title: String, artist: String, album: String, year: Int? = null, isDemo: Boolean = false, isUnreleased: Boolean = false) {
+    fun processTrack(
+        track: TrackEntity,
+        title: String,
+        artist: String,
+        album: String,
+        year: Int? = null,
+        isDemo: Boolean = false,
+        isUnreleased: Boolean = false,
+        isLive: Boolean = false,
+        liveCity: String? = null,
+        liveYear: Int? = null
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
             val context = getApplication<Application>().applicationContext
             val uri = Uri.parse(track.uri)
             val tempFile = java.io.File(context.cacheDir, "temp_tag_edit.mp3")
 
+            val cleanLiveCity = if (isLive) liveCity?.trim()?.takeIf { it.isNotBlank() } else null
+            val cleanLiveYear = if (isLive) liveYear else null
+
             try {
-                // 1. Копируем файл во временную память, чтобы случайно не сломать оригинал
                 context.contentResolver.openInputStream(uri)?.use { input ->
                     tempFile.outputStream().use { output -> input.copyTo(output) }
                 }
 
-                // 2. Вскрываем библиотекой
                 val audioFile = org.jaudiotagger.audio.AudioFileIO.read(tempFile)
                 val tag = audioFile.tagOrCreateAndSetDefault
 
-                // 3. Пишем стандартные теги
                 tag.setField(org.jaudiotagger.tag.FieldKey.TITLE, title.trim())
                 tag.setField(org.jaudiotagger.tag.FieldKey.ARTIST, artist.trim())
-                if (album.isNotBlank()) tag.setField(org.jaudiotagger.tag.FieldKey.ALBUM, album.trim())
+                if (album.isNotBlank()) {
+                    tag.setField(org.jaudiotagger.tag.FieldKey.ALBUM, album.trim())
+                } else {
+                    tag.deleteField(org.jaudiotagger.tag.FieldKey.ALBUM)
+                }
                 if (year != null) tag.setField(org.jaudiotagger.tag.FieldKey.YEAR, year.toString())
 
-                // 4. Вшиваем кастомный статус (Demo / Unreleased)
+                // Вшиваем кастомный статус (включая город и год для LIVE)
                 val typeTag = when {
+                    isLive -> "LIVE|${cleanLiveCity ?: ""}|${cleanLiveYear ?: ""}"
                     isDemo -> "DEMO"
                     isUnreleased -> "UNRELEASED"
                     else -> "NORMAL"
                 }
                 tag.setField(org.jaudiotagger.tag.FieldKey.COMMENT, "DUBMUSIC=$typeTag")
 
-                audioFile.commit() // Сохраняем в tempFile
+                audioFile.commit()
 
-                // 5. Перезаписываем физический файл на жестком диске телефона
                 context.contentResolver.openOutputStream(uri, "wt")?.use { output ->
                     tempFile.inputStream().use { input -> input.copyTo(output) }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                // Если нет прав на запись, мы просто пропустим этап с файлом,
-                // но всё равно обновим приложение ниже, чтобы не бесить пользователя.
             } finally {
-                tempFile.delete() // Убираем за собой мусор в любом случае
+                tempFile.delete()
             }
 
-            // 6. Обновляем локальную базу данных, чтобы интерфейс перерисовался мгновенно
             val updatedTrack = track.copy(
                 title = title.trim(),
                 artist = artist.ifBlank { "Неизвестный исполнитель" },
@@ -299,9 +393,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 year = year ?: track.year,
                 isDemo = isDemo,
                 isUnreleased = isUnreleased,
+                isLive = isLive,
+                liveCity = cleanLiveCity,
+                liveYear = cleanLiveYear,
                 isProcessed = true
             )
             dao.updateTrack(updatedTrack)
+
+            // Если этот трек прямо сейчас открыт в плеере — мгновенно обновляем его на экране
+            if (_currentTrack.value?.uri == updatedTrack.uri) {
+                _currentTrack.value = updatedTrack
+                musicService?.currentTrackItem = updatedTrack
+            }
         }
     }
 
@@ -398,7 +501,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             val artistMap = mutableMapOf<String, Long>()
             trackStats.forEach { ts ->
                 // Разбиваем строку "Артист 1, Артист 2" на отдельных артистов
-                val artists = ts.track.artist?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() } ?: listOf("Неизвестный исполнитель")
+                val artists = parseArtists(ts.track.artist) // (а в loyaltyArtists: parseArtists(item.trackArtist))
                 artists.forEach { a ->
                     artistMap[a] = (artistMap[a] ?: 0L) + ts.statValue
                 }
@@ -413,7 +516,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         dao.getAllTrackCountsForPeriod(bounds.first, bounds.second).mapLatest { trackStats ->
             val artistMap = mutableMapOf<String, Long>()
             trackStats.forEach { ts ->
-                val artists = ts.track.artist?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() } ?: listOf("Неизвестный исполнитель")
+                val artists = parseArtists(ts.track.artist) // (а в loyaltyArtists: parseArtists(item.trackArtist))
                 artists.forEach { a ->
                     artistMap[a] = (artistMap[a] ?: 0L) + ts.statValue
                 }
@@ -430,7 +533,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         history.forEach { item ->
             // Переводим миллисекунды в строку даты (чтобы считать только уникальные дни)
             val dateStr = sdf.format(java.util.Date(item.timestamp))
-            val artists = item.trackArtist?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() } ?: listOf("Неизвестный исполнитель")
+            val artists = parseArtists(item.trackArtist)
 
             artists.forEach { a ->
                 if (artistDays[a] == null) artistDays[a] = mutableSetOf()
@@ -483,6 +586,31 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     val heatmapWeeks = dao.getHeatmapWeeks().stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
     val heatmapMonths = dao.getHeatmapMonths().stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
 
+    // --- ИСТОРИЯ ПРОСЛУШИВАНИЙ (СЕГОДНЯ + ВЧЕРА) ---
+    private fun getYesterdayStartMillis(): Long {
+        val cal = java.util.Calendar.getInstance()
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+        cal.set(java.util.Calendar.MINUTE, 0)
+        cal.set(java.util.Calendar.SECOND, 0)
+        cal.set(java.util.Calendar.MILLISECOND, 0)
+        cal.add(java.util.Calendar.DAY_OF_YEAR, -1) // Начало вчерашнего дня (00:00)
+        return cal.timeInMillis
+    }
+
+    val recentListeningHistory = dao.getRecentListeningHistory(getYesterdayStartMillis())
+        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), emptyList())
+
+    fun formatHistoryTimestamp(timestamp: Long): String {
+        val now = java.util.Calendar.getInstance()
+        val target = java.util.Calendar.getInstance().apply { timeInMillis = timestamp }
+        val timeFormat = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+        val timeStr = timeFormat.format(java.util.Date(timestamp))
+
+        val isToday = now.get(java.util.Calendar.YEAR) == target.get(java.util.Calendar.YEAR) &&
+                now.get(java.util.Calendar.DAY_OF_YEAR) == target.get(java.util.Calendar.DAY_OF_YEAR)
+
+        return if (isToday) "Сегодня, $timeStr" else "Вчера, $timeStr"
+    }
 
     // --- ЛОГИКА КАСТОМНЫХ ПЛЕЙЛИСТОВ ---
     val allPlaylists = dao.getAllPlaylists()
@@ -534,8 +662,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // Получить треки для конкретного плейлиста
+    private val playlistTracksCache = mutableMapOf<Int, List<TrackEntity>>()
+
+    fun getCachedPlaylistTracks(playlistId: Int): List<TrackEntity> {
+        return playlistTracksCache[playlistId] ?: emptyList()
+    }
+
+    // Получить треки для конкретного плейлиста
     fun getTracksForPlaylist(playlistId: Int): Flow<List<TrackEntity>> {
-        return dao.getTracksForPlaylist(playlistId)
+        return kotlinx.coroutines.flow.flow {
+            dao.getTracksForPlaylist(playlistId).collect { tracks ->
+                playlistTracksCache[playlistId] = tracks
+                emit(tracks)
+            }
+        }
     }
     // Получить плейлисты для конкретного трека
     fun getPlaylistsForTrack(trackUri: String): Flow<List<Int>> {
@@ -576,16 +716,26 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // НОВАЯ ФУНКЦИЯ ДЛЯ СМЕНЫ МЕСТ
-    fun moveTrackInPlaylist(playlistId: Int, fromIndex: Int, toIndex: Int) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val refs = dao.getPlaylistTrackRefs(playlistId) // Они уже отсортированы ASC
-            if (fromIndex in refs.indices && toIndex in refs.indices) {
-                val item1 = refs[fromIndex]
-                val item2 = refs[toIndex]
+    // СОХРАНЕНИЕ ТОЧНОГО ПОРЯДКА ТРЕКОВ В ПЛЕЙЛИСТЕ
+    fun savePlaylistOrder(playlistId: Int, playlistName: String, orderedTracks: List<TrackEntity>) {
 
-                // Жестко принудительно меняем позиции через SQL
-                dao.updateTrackPosition(playlistId, item1.trackUri, item2.position)
-                dao.updateTrackPosition(playlistId, item2.trackUri, item1.position)
+        playlistTracksCache[playlistId] = orderedTracks
+        // 1. Если этот плейлист сейчас играет в плеере — мгновенно обновляем его очередь
+        if (_currentQueueTitle.value == playlistName) {
+            currentQueue = orderedTracks
+            _currentQueueFlow.value = orderedTracks
+            _currentTrack.value?.let { current ->
+                currentQueueIndex = currentQueue.indexOfFirst { it.uri == current.uri }
+            }
+            musicService?.savedQueue = currentQueue
+        }
+
+        // 2. Записываем новые позиции (0, 1, 2...) в базу данных одной быстрой транзакцией
+        viewModelScope.launch(Dispatchers.IO) {
+            db.runInTransaction {
+                orderedTracks.forEachIndexed { index, track ->
+                    dao.updateTrackPosition(playlistId, track.uri, index)
+                }
             }
         }
     }
@@ -661,6 +811,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        val isSameQueue = (playlist == currentQueue && _currentQueueTitle.value != "Очередь")
+
         if (playlist != null) {
             currentQueue = playlist
             _currentQueueFlow.value = playlist
@@ -669,14 +821,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (forcedTitle != null) {
                 // Если передали конкретное название (например, из кастомного плейлиста)
                 _currentQueueTitle.value = forcedTitle
-            } else {
-                // Умное авто-определение!
+            } else if (!isSameQueue) {
+                // Умное авто-определение (только если это реально новая очередь!)
                 val isSameAlbum = playlist.isNotEmpty() && playlist.all { it.album == playlist.first().album }
                 val isSameArtist = playlist.isNotEmpty() && playlist.all { it.artist == playlist.first().artist }
 
                 _currentQueueTitle.value = when {
                     isSameAlbum && !playlist.first().album.isNullOrBlank() -> playlist.first().album!!
-                    isSameArtist && !playlist.first().artist.isNullOrBlank() -> "Треки: ${playlist.first().artist}"
+                    isSameArtist && !playlist.first().artist.isNullOrBlank() -> "Треки: ${parseArtists(playlist.first().artist).first()}"
                     playlist.size == cachedTracks.size -> "Все скачанные треки"
                     else -> "Моя музыка"
                 }
@@ -941,8 +1093,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
         // 1. Группируем треки по ГЛАВНОМУ артисту (первому до запятой)
         val groupedByPrimaryArtist = tracks.groupBy { track ->
-            val trackArtists = track.artist?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() }
-            trackArtists?.firstOrNull() ?: "Неизвестный исполнитель"
+            parseArtists(track.artist).first()
         }
 
         groupedByPrimaryArtist.forEach { (primaryArtistName, artistTracks) ->
@@ -954,7 +1105,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
             groupedByAlbum.forEach { (albumTitle, albumTracks) ->
                 val releaseYear = albumTracks.firstNotNullOfOrNull { it.year }
-                val regular = albumTracks.filter { !it.isDemo && !it.isUnreleased }
+                val regular = albumTracks.filter { !it.isDemo && !it.isUnreleased && !it.isLive }
+                val lives = albumTracks.filter { it.isLive }
                 val demos = albumTracks.filter { it.isDemo }
                 val unreleased = albumTracks.filter { it.isUnreleased }
 
@@ -969,8 +1121,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     year = releaseYear,
                     coverUri = prefs.getString(albumPhotoKey, null),
                     regularTracks = regular,
+                    liveTracks = lives,
                     demoTracks = demos,
                     unreleasedTracks = unreleased,
+                    hasLiveEnabled = lives.isNotEmpty(),
                     hasDemosEnabled = demos.isNotEmpty(),
                     hasUnreleasedEnabled = unreleased.isNotEmpty(),
                     isSingle = isSingleItem // Флаг сингла
@@ -982,7 +1136,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
                 // ИЩЕМ ФИТЫ: пробегаемся по трекам и смотрим, есть ли гости
                 albumTracks.forEach { track ->
-                    val trackArtists = track.artist?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() } ?: emptyList()
+                    val trackArtists = parseArtists(track.artist)
                     if (trackArtists.size > 1) {
                         trackArtists.drop(1).forEach { guestName ->
                             val gArtistData = artistDataMap.getOrPut(guestName) { ArtistData() }
@@ -1012,13 +1166,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 else (a1.year ?: 0).compareTo(a2.year ?: 0)
             }
 
+            // Сортируем все треки артиста по времени прослушивания сразу в памяти
+            val sortedArtistTracks = data.allTracks.toList()
+                .sortedByDescending { cachedPlayDurations[it.uri] ?: 0L }
+
             Artist(
                 name = artistName,
                 photoUri = prefs.getString(artistName, null),
                 albums = sortedAlbums,
                 appearances = data.appearances.toList().distinctBy { it.title }.sortedBy { it.year ?: 0 },
-                topTracks = data.allTracks.toList().take(5),
-                allTracks = data.allTracks.toList()
+                topTracks = sortedArtistTracks.take(5),
+                allTracks = sortedArtistTracks
             )
         }.sortedByDescending { it.allTracks.size }
 
@@ -1081,7 +1239,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun getAlbumCoverPath(artistName: String?, albumTitle: String?): String? {
         if (artistName.isNullOrBlank() || albumTitle.isNullOrBlank()) return null
-        val primaryArtist = artistName.split(",").map { it.trim() }.firstOrNull { it.isNotBlank() } ?: "Неизвестный исполнитель"
+        val primaryArtist = parseArtists(artistName).first()
         val albumPhotoKey = "album_photo_${primaryArtist}_${albumTitle}"
         return prefs.getString(albumPhotoKey, null)
     }
@@ -1123,10 +1281,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         var year: Int? = null
         var coverArt: ByteArray? = null
         var trackType: String? = null
+        var liveCity: String? = null
+        var liveYear: Int? = null
         var lyricsText: String? = null
 
         // 2. Пуленепробиваемое чтение через временный файл
-        val tempFile = java.io.File(context.cacheDir, "temp_tag_read.mp3")
+        //(уникальный файл для каждого чтения, чтобы потоки не перезаписывали друг друга):
+        val tempFile = java.io.File.createTempFile("temp_tag_read_", ".mp3", context.cacheDir)
         try {
             // Копируем файл из системы в наш кэш
             context.contentResolver.openInputStream(uri)?.use { input ->
@@ -1148,10 +1309,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     year = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.YEAR))?.take(4)?.toIntOrNull()
                     coverArt = tag.firstArtwork?.binaryData
 
-                    // Читаем наш секретный комментарий (DEMO / UNRELEASED)
+                    // Читаем наш секретный комментарий (DEMO / UNRELEASED / LIVE|Город|Год)
                     val comment = clean(tag.getFirst(org.jaudiotagger.tag.FieldKey.COMMENT))
                     if (comment != null && comment.startsWith("DUBMUSIC=")) {
-                        trackType = comment.substringAfter("DUBMUSIC=")
+                        val payload = comment.substringAfter("DUBMUSIC=")
+                        if (payload.startsWith("LIVE")) {
+                            trackType = "LIVE"
+                            val parts = payload.split("|")
+                            liveCity = parts.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }
+                            liveYear = parts.getOrNull(2)?.trim()?.toIntOrNull()
+                        } else {
+                            trackType = payload
+                        }
                     }
 
                     // --- ЧИТАЕМ ТЕКСТ ИЗ ФАЙЛА ---
@@ -1186,7 +1355,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             year = year,
             coverArt = coverArt,
             trackType = trackType,
-            lyrics = lyricsText
+            lyrics = lyricsText,
+            liveCity = liveCity,
+            liveYear = liveYear
         )
     }
 
@@ -1341,17 +1512,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     //запоминает сразу всю папку
     fun scanAndHealFolder(context: android.content.Context, folderUri: android.net.Uri) {
         viewModelScope.launch(Dispatchers.IO) {
-            // DocumentFile позволяет безопасно обходить папки, на которые получено разрешение
             val rootFolder = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, folderUri)
 
-            fun traverseFolder(folder: androidx.documentfile.provider.DocumentFile?) {
+            suspend fun traverseFolder(folder: androidx.documentfile.provider.DocumentFile?) {
                 folder?.listFiles()?.forEach { file ->
                     if (file.isDirectory) {
-                        traverseFolder(file) // Если это папка - ныряем внутрь
+                        traverseFolder(file)
                     } else if (file.isFile && file.type?.startsWith("audio/") == true) {
-                        // Это аудиофайл. Скармливаем его твоей УЖЕ ГОТОВОЙ умной функции!
-                        // Она сама поймет: это новый трек или сломанный старый, который надо вылечить.
-                        addUnprocessedFile(file.uri.toString())
+                        addUnprocessedFileInternal(file.uri.toString())
                     }
                 }
             }
@@ -1375,6 +1543,45 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
 
+    // Быстрое сканирование всех папок, к которым уже выдан доступ (без открытия проводника!)
+    fun refreshGrantedFolders(context: android.content.Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val grantedFolderUris = context.contentResolver.persistedUriPermissions
+                .filter { it.isReadPermission && it.uri.toString().contains("tree/") }
+                .map { it.uri }
+
+            if (grantedFolderUris.isEmpty()) {
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(context, "Сначала добавьте папку через «Добавить папку»", android.widget.Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+
+            withContext(Dispatchers.Main) {
+                android.widget.Toast.makeText(context, "Проверяем новые файлы...", android.widget.Toast.LENGTH_SHORT).show()
+            }
+
+            suspend fun traverseFolder(folder: androidx.documentfile.provider.DocumentFile?) {
+                folder?.listFiles()?.forEach { file ->
+                    if (file.isDirectory) {
+                        traverseFolder(file)
+                    } else if (file.isFile && file.type?.startsWith("audio/") == true) {
+                        addUnprocessedFileInternal(file.uri.toString())
+                    }
+                }
+            }
+
+            for (folderUri in grantedFolderUris) {
+                val rootFolder = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, folderUri)
+                traverseFolder(rootFolder)
+            }
+
+            withContext(Dispatchers.Main) {
+                android.widget.Toast.makeText(context, "Медиатека обновлена!", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     // Возвращает трек к "заводским" настройкам
     fun resetTrackInfo(track: TrackEntity) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -1384,9 +1591,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 album = null,
                 isDemo = false,
                 isUnreleased = false,
+                isLive = false,
+                liveCity = null,
+                liveYear = null,
                 isProcessed = false
             )
-            // insertTrack сработает как обновление (REPLACE), так как URI остался прежним
             dao.insertTrack(resetTrack)
         }
     }

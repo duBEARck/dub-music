@@ -18,7 +18,10 @@ data class TrackEntity(
     val isUnreleased: Boolean = false, // <--- флаг невыпущенного трека
     val albumOrder: Int = 0, // <--- НОВОЕ ПОЛЕ ДЛЯ ПОРЯДКА В АЛЬБОМЕ
     val dateAdded: Long = System.currentTimeMillis(), // для статистики
-    val lyrics: String? = null // <--- текст песни
+    val lyrics: String? = null, // <--- текст песни
+    val isLive: Boolean = false, // <--- флаг живого выступления
+    val liveCity: String? = null, // <--- город выступления
+    val liveYear: Int? = null // <--- год выступления
 )
 
 // --- НОВАЯ ТАБЛИЦА: ИСТОРИЯ ПРОСЛУШИВАНИЙ ---
@@ -81,6 +84,12 @@ data class HeatmapStat(
 data class TrackHistoryInfo(
     val trackArtist: String?,
     val timestamp: Long
+)
+
+data class RecentHistoryItem(
+    @Embedded val track: TrackEntity,
+    val historyId: Int,
+    val playedAt: Long
 )
 
 @Dao
@@ -253,6 +262,8 @@ interface TrackDao {
     // 1. Переносим статистику со старого трека на новый
     @Query("UPDATE listening_history SET trackUri = :newUri WHERE trackUri = :oldUri")
     fun updateHistoryUri(oldUri: String, newUri: String)
+    @Query("UPDATE OR REPLACE playlist_tracks SET trackUri = :newUri WHERE trackUri = :oldUri")
+    fun updatePlaylistTrackUri(oldUri: String, newUri: String)
 
     // 2. Удаляем старый битый трек
     @Query("DELETE FROM tracks WHERE uri = :uri")
@@ -261,13 +272,26 @@ interface TrackDao {
     @Query("UPDATE tracks SET durationMs = :newDuration WHERE uri = :uri")
     fun updateTrackDuration(uri: String, newDuration: Long)
 
+    @Query("DELETE FROM playlist_tracks WHERE playlistId = :playlistId AND trackUri = :trackUri")
+    fun removeTrackFromPlaylist(playlistId: Int, trackUri: String)
+
     @Delete
     fun deletePlaylist(playlist: PlaylistEntity)
+
+    //запрос истории
+    @Query("""
+        SELECT t.*, h.id as historyId, h.timestamp as playedAt 
+        FROM listening_history h
+        INNER JOIN tracks t ON h.trackUri = t.uri
+        WHERE h.timestamp >= :sinceTime
+        ORDER BY h.timestamp DESC
+    """)
+    fun getRecentListeningHistory(sinceTime: Long): Flow<List<RecentHistoryItem>>
 }
 
 @Database(
     entities = [TrackEntity::class, PlaylistEntity::class, PlaylistTrackCrossRef::class, ListeningHistoryEntity::class], // Добавили сюда
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
